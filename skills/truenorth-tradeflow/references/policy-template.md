@@ -1,10 +1,10 @@
 # Reserved future policy template
 
-Keep personal values in the Hermes profile configuration, not in this public repository. This template does not enable order execution in version `0.1.4`.
+Keep personal values in the Hermes profile configuration, not in this public repository. This template does not enable order execution in version `0.1.5`.
 
 | Setting | Safe initial value | Purpose |
 |---|---|---|
-| `execution_mode` | `review_only` | The only supported mode in `0.1.4`; `live` is unsupported. |
+| `execution_mode` | `review_only` | The only supported mode in `0.1.5`; `live` is unsupported. |
 | `default_entry_intent` | `research_only` | Default for a bare analysis request. A direct trade request without intent always asks `market_now` or `limit_level`. |
 | `allowed_tokens` | Empty | Reserved for a future validated live release. |
 | `max_leverage` | `0` | Reserved for a future validated live release. |
@@ -14,7 +14,7 @@ Keep personal values in the Hermes profile configuration, not in this public rep
 
 ## Future live-release requirements
 
-Do not set `execution_mode` to `live` in version `0.1.4`; it cannot authorize or execute an order. Before a later release may expose live execution, it must:
+Do not set `execution_mode` to `live` in version `0.1.5`; it cannot authorize or execute an order. Before a later release may expose live execution, it must:
 
 1. Set a non-empty token allowlist.
 2. Set a maximum leverage.

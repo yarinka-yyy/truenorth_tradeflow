@@ -15,10 +15,10 @@
 | Direction | `[LONG / SHORT]` |
 | Entry mode | `[market / limit]` |
 | Entry | `[exact price or range]` |
-| Market reference / fill boundary | `[required for future market_now; otherwise N/A]` |
-| Limit expiry / cancel condition | `[required for future limit_level; otherwise N/A]` |
-| Leverage | `[exact positive number; required only for a future live release]` |
-| Margin | `[exact positive USDC; required only for a future live release, not notional]` |
+| Market reference / fill boundary | `[required for a market_now candidate; otherwise N/A]` |
+| Limit expiry / cancel condition | `[required for a limit_level candidate; otherwise N/A]` |
+| Leverage | `[exact value if supplied; no live eligibility in this release]` |
+| Margin | `[exact USDC margin if supplied; no live eligibility in this release; notional alone is insufficient for future live use]` |
 | Stop-loss | `[value]` |
 | Take-profit | `[one or more levels]` |
 | Risk/reward | `[value / not supplied]` |
@@ -32,7 +32,7 @@
 
 **Order-panel state:** `[not used; panel defaults are not setup evidence]`
 
-**Live eligibility:** `[review_only in 0.1.4 / rejected with reason]`
+**Live eligibility:** `[review_only in 0.1.5 / rejected with reason]`
 
 **Decision:**
 
@@ -40,4 +40,4 @@
 - Cancel
 - Ask TrueNorth a follow-up
 
-> Version `0.1.4` does not invoke TrueNorth order controls. Any future approval is valid only for this exact card. A change to requested intent, market, side, entry, leverage, margin, SL, TP, fill boundary, limit expiry, or card expiry cancels it.
+> Version `0.1.5` does not invoke TrueNorth order controls. Any future approval is valid only for this exact card. A change to requested intent, market, side, entry, leverage, margin, SL, TP, fill boundary, limit expiry, or card expiry cancels it.
