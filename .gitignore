@@ -1,0 +1,11 @@
+# Secrets and user-specific settings
+.env
+.env.*
+!.env.example
+*.local.*
+
+# Local runtime/browser data
+runtime/
+browser-data/
+__pycache__/
+.DS_Store
