@@ -29,8 +29,8 @@ Accept a setup only when all material fields are clear:
 | LONG or SHORT | Yes |
 | Market or limit entry | Yes |
 | Exact entry or range | Yes |
-| Positive numerical leverage | Required for live execution |
-| Exact positive margin in USDC | Required for live execution; notional-only is rejected |
+| Positive numerical leverage | Required only for a future live release |
+| Exact positive margin in USDC | Required only for a future live release; notional-only is rejected |
 | Stop-loss | Yes |
 | At least one take-profit | Yes |
 | Invalidation condition | Yes |

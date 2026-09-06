@@ -31,7 +31,7 @@ The installer scans the skill before installing it. Do not bypass a security war
 
 ## First-time configuration
 
-The skill starts in `review_only` mode. These local limits are reserved for a future live release: set allowed tokens, maximum leverage, maximum margin, allowed entry modes, and setup freshness window. They do **not** unlock order execution in `0.1.2`. A future live release will require positive finite leverage and an exact positive margin in USDC; a notional-only setup cannot be opened. These settings live in the user's Hermes profile and are not part of this repository.
+The skill starts in `review_only` mode. These local limits are reserved for a future live release: set allowed tokens, maximum leverage, maximum margin, allowed entry modes, and setup freshness window. They do **not** unlock order execution in `0.1.3`; setting `execution_mode` to `live` is unsupported and has no effect. A future live release will require positive finite leverage and an exact positive margin in USDC; a notional-only setup cannot be opened. These settings live in the user's Hermes profile and are not part of this repository.
 
 ## Use
 
@@ -39,13 +39,13 @@ The skill starts in `review_only` mode. These local limits are reserved for a fu
 /truenorth-tradeflow Find a swing setup for $ETH.
 ```
 
-Hermes will show a review card. In the current release, choose **Keep review-only** or **Ask TrueNorth a follow-up**; it will not place an order. If TrueNorth or a wallet shows a password, signature, permission, or 2FA prompt, the user handles it directly.
+Hermes will show a review card. In `0.1.3`, choose **Keep review-only** or **Ask TrueNorth a follow-up**; it will not place an order. If TrueNorth or a wallet shows a password, signature, permission, or 2FA prompt, the user handles it directly.
 
 ## Prerequisites
 
 - Hermes with browser automation available.
 - An authenticated TrueNorth browser session.
-- A connected TrueNorth trading account if live execution is enabled.
+- No connected trading account is needed for `0.1.3` review-only use.
 - User approval for any Chrome remote-debugging or wallet prompt.
 
 ## Browser boundary
@@ -69,7 +69,7 @@ skills/truenorth-tradeflow/
 
 ## Status
 
-`0.1.2` — authenticated TrueNorth analysis/review flow tested in-browser. The test confirmed that a full agent response and an inline setup card can be captured without creating an order. It also showed that the separate order-panel defaults can differ from the AI recommendation, so **Edit**, **One-Click Setup**, and **Place Order & Launch Agent** remain intentionally disabled in this release. A future version may add a narrow local MCP guard only after those controls are independently mapped and verified with a matching order/position read-back.
+`0.1.3` — authenticated TrueNorth analysis/review flow tested in-browser. The test confirmed that a full agent response and an inline setup card can be captured without creating an order. It also showed that the separate order-panel defaults can differ from the AI recommendation, so **Edit**, **One-Click Setup**, and **Place Order & Launch Agent** remain intentionally disabled in this release. Setting `execution_mode` to `live` does not change that. A future version may add a narrow local MCP guard only after those controls are independently mapped and verified with a matching order/position read-back.
 
 ## License
 

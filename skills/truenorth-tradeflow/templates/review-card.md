@@ -13,8 +13,8 @@
 | Direction | `[LONG / SHORT]` |
 | Entry mode | `[market / limit]` |
 | Entry | `[exact price or range]` |
-| Leverage | `[exact positive number; required for live]` |
-| Margin | `[exact positive USDC; required for live, not notional]` |
+| Leverage | `[exact positive number; required only for a future live release]` |
+| Margin | `[exact positive USDC; required only for a future live release, not notional]` |
 | Stop-loss | `[value]` |
 | Take-profit | `[one or more levels]` |
 | Risk/reward | `[value / not supplied]` |
@@ -28,7 +28,7 @@
 
 **Order-panel state:** `[not used; panel defaults are not setup evidence]`
 
-**Live eligibility:** `[review_only in 0.1.2 / rejected with reason]`
+**Live eligibility:** `[review_only in 0.1.3 / rejected with reason]`
 
 **Decision:**
 
@@ -36,4 +36,4 @@
 - Cancel
 - Ask TrueNorth a follow-up
 
-> Version `0.1.2` does not invoke TrueNorth order controls. Any future approval is valid only for this exact card. A change to market, side, entry, leverage, margin, SL, TP, or card expiry cancels it.
+> Version `0.1.3` does not invoke TrueNorth order controls. Any future approval is valid only for this exact card. A change to market, side, entry, leverage, margin, SL, TP, or card expiry cancels it.
