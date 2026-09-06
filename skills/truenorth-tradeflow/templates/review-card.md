@@ -3,7 +3,9 @@
 **Setup ID:** `[one-time ID]`
 **Source:** TrueNorth chat `[thread/reference]`, message `[message ID]`
 **Received:** `[timestamp]`
-**Expires:** `[earlier of TrueNorth validity and configured maximum age]`
+**Expires:** `[earliest of TrueNorth text validity, inline-card expiry, and configured maximum age]`
+**Source state:** `[NO_TRADE / candidate setup / rejected conflict]`
+**Origin checked:** `https://truenorth.xyz`
 
 | Field | TrueNorth result |
 |---|---|
@@ -22,12 +24,16 @@
 
 **Verbatim structured source response:** `[exact response or retained source reference]`
 
-**Live eligibility:** `[review_only / eligible / rejected with reason]`
+**Inline setup card:** `[exact displayed values and expiry, or absent]`
+
+**Order-panel state:** `[not used; panel defaults are not setup evidence]`
+
+**Live eligibility:** `[review_only in 0.1.2 / rejected with reason]`
 
 **Decision:**
 
-- Open this exact setup `[setup ID]`
+- Keep review-only `[setup ID]`
 - Cancel
 - Ask TrueNorth a follow-up
 
-> Approval is valid only for this exact card. Any change to market, side, entry, leverage, margin, SL, or TP cancels it. A live trade requires exact positive leverage and exact positive margin in USDC within the configured limits.
+> Version `0.1.2` does not invoke TrueNorth order controls. Any future approval is valid only for this exact card. A change to market, side, entry, leverage, margin, SL, TP, or card expiry cancels it.

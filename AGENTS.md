@@ -6,6 +6,8 @@
 - Commit and push every verified logical change to `origin/main`.
 - Never add account data, addresses, screenshots, chat history, credentials, API keys, private keys, seed phrases, wallet passwords, signatures, or personal risk settings.
 - Keep the product TrueNorth-only: do not add direct Hyperliquid browsing, APIs, or signing.
+- Keep the browser origin exact: `https://truenorth.xyz` only; stop on off-origin redirects, popups, and links.
 - Preserve the approval-first workflow. No routine, alert, prior approval, or model inference can authorize a trade.
+- Do not enable or document an order-button click until its semantics and resulting order/position read-back have been independently verified.
 - Do not add a backend, MCP server, database, package dependency, or build system unless the user explicitly requests a later version.
 - Keep the direct install path valid: `owner/repo/skills/truenorth-tradeflow`.

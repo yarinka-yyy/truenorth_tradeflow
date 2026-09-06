@@ -1,6 +1,6 @@
 # TrueNorth TradeFlow
 
-An unofficial, approval-first [Hermes Agent](https://hermes-agent.nousresearch.com/) skill for turning a TrueNorth trade analysis into a reviewed execution flow inside the already connected TrueNorth interface.
+An unofficial, review-first [Hermes Agent](https://hermes-agent.nousresearch.com/) skill for turning a TrueNorth trade analysis into a structured review flow inside the already connected TrueNorth interface.
 
 > TrueNorth TradeFlow automates repetitive browser work. It is not financial advice, does not guarantee outcomes, and never removes the user's final decision.
 
@@ -8,13 +8,14 @@ An unofficial, approval-first [Hermes Agent](https://hermes-agent.nousresearch.c
 
 1. Opens TrueNorth and asks its agent for a structured setup.
 2. Returns a compact review card in Hermes: side, entry, stop-loss, take-profit, invalidation, and source rationale.
-3. Waits for a fresh, explicit approval.
-4. Returns to the same TrueNorth chat and uses its native trade path for the approved setup only.
-5. Reads back the resulting order or position before reporting success.
+3. Captures the complete response and inline setup-card expiry for a review card.
+4. Keeps the result review-only in the current release; it does not click a TrueNorth order control.
+5. Leaves future native execution gated on an independently mapped, verified UI flow.
 
 ## What it never does
 
 - Does not navigate directly to Hyperliquid or use a Hyperliquid API.
+- Opens only the exact TrueNorth origin, `https://truenorth.xyz`, during its browser workflow.
 - Does not handle seed phrases, private keys, wallet passwords, API keys, signatures, or 2FA.
 - Does not approve a wallet, browser permission, payment, or signing dialog.
 - Does not execute a trade from a routine, alert, stale approval, or ambiguous message.
@@ -30,13 +31,7 @@ The installer scans the skill before installing it. Do not bypass a security war
 
 ## First-time configuration
 
-The skill starts in `review_only` mode. Before enabling live execution, configure personal limits locally:
-
-```bash
-hermes config migrate
-```
-
-Set the allowed tokens, maximum leverage, maximum margin, allowed entry modes, and setup freshness window. Live execution requires positive finite leverage and an exact positive margin in USDC; a notional-only setup is review-only and cannot be opened. These settings live in the user's Hermes profile and are not part of this repository.
+The skill starts in `review_only` mode. These local limits are reserved for a future live release: set allowed tokens, maximum leverage, maximum margin, allowed entry modes, and setup freshness window. They do **not** unlock order execution in `0.1.2`. A future live release will require positive finite leverage and an exact positive margin in USDC; a notional-only setup cannot be opened. These settings live in the user's Hermes profile and are not part of this repository.
 
 ## Use
 
@@ -44,7 +39,7 @@ Set the allowed tokens, maximum leverage, maximum margin, allowed entry modes, a
 /truenorth-tradeflow Find a swing setup for $ETH.
 ```
 
-Hermes will show a review card. Choose **Open this exact setup** only after reading it. If TrueNorth or a wallet shows a password, signature, permission, or 2FA prompt, the user handles it directly.
+Hermes will show a review card. In the current release, choose **Keep review-only** or **Ask TrueNorth a follow-up**; it will not place an order. If TrueNorth or a wallet shows a password, signature, permission, or 2FA prompt, the user handles it directly.
 
 ## Prerequisites
 
@@ -52,6 +47,12 @@ Hermes will show a review card. Choose **Open this exact setup** only after read
 - An authenticated TrueNorth browser session.
 - A connected TrueNorth trading account if live execution is enabled.
 - User approval for any Chrome remote-debugging or wallet prompt.
+
+## Browser boundary
+
+The skill starts at `https://truenorth.xyz/` and permits only paths whose parsed origin remains exactly `https://truenorth.xyz`. It stops on every off-origin redirect, popup, or link, including direct Hyperliquid and wallet routes.
+
+This is a documented skill rule, not a technical browser sandbox. A future local guard must enforce it in code before live trading is supported.
 
 ## Repository layout
 
@@ -68,7 +69,7 @@ skills/truenorth-tradeflow/
 
 ## Status
 
-`0.1.1` — skill-first browser workflow with fail-closed live leverage, margin, and expiry requirements. A future version may add a narrow local MCP guard only after the live TrueNorth UI flow is independently mapped and tested.
+`0.1.2` — authenticated TrueNorth analysis/review flow tested in-browser. The test confirmed that a full agent response and an inline setup card can be captured without creating an order. It also showed that the separate order-panel defaults can differ from the AI recommendation, so **Edit**, **One-Click Setup**, and **Place Order & Launch Agent** remain intentionally disabled in this release. A future version may add a narrow local MCP guard only after those controls are independently mapped and verified with a matching order/position read-back.
 
 ## License
 
