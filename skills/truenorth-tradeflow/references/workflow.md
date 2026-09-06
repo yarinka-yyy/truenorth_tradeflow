@@ -20,7 +20,8 @@ CANCELLED | EXPIRED | REJECTED_BY_POLICY | NOT_EXECUTED | FAILED
 ## Transition rules
 
 - Only `AWAITING_USER_APPROVAL` may enter `EXECUTION_REQUESTED`.
-- Approval is fresh, single-use, setup-bound, and expires after the configured lifetime.
+- Approval is fresh, single-use, setup-bound, and expires at the earlier of the configured lifetime and the TrueNorth validity window. Missing validity is not executable.
+- In live mode, `EXECUTION_REQUESTED` requires exact positive finite leverage plus exact positive margin in USDC within configured limits. Notional-only, ranges, estimates, zeroes, and missing values transition to `REJECTED_BY_POLICY`.
 - A changed token, direction, entry, leverage, margin, stop-loss, or take-profit invalidates approval.
 - A protected prompt transitions to `AWAITING_EXTERNAL_CONFIRMATION`; Hermes stops and the user handles it locally.
 - A matching order or position read-back is required for `POSITION_VERIFIED`.

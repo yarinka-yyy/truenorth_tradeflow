@@ -36,7 +36,7 @@ The skill starts in `review_only` mode. Before enabling live execution, configur
 hermes config migrate
 ```
 
-Set the allowed tokens, maximum leverage, maximum margin, allowed entry modes, and setup freshness window. These settings live in the user's Hermes profile and are not part of this repository.
+Set the allowed tokens, maximum leverage, maximum margin, allowed entry modes, and setup freshness window. Live execution requires positive finite leverage and an exact positive margin in USDC; a notional-only setup is review-only and cannot be opened. These settings live in the user's Hermes profile and are not part of this repository.
 
 ## Use
 
@@ -68,7 +68,7 @@ skills/truenorth-tradeflow/
 
 ## Status
 
-`0.1.0` — skill-first browser workflow. A future version may add a narrow local MCP guard only after the live TrueNorth UI flow is independently mapped and tested.
+`0.1.1` — skill-first browser workflow with fail-closed live leverage, margin, and expiry requirements. A future version may add a narrow local MCP guard only after the live TrueNorth UI flow is independently mapped and tested.
 
 ## License
 

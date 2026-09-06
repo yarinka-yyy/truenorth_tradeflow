@@ -6,8 +6,8 @@ Keep personal values in the Hermes profile configuration, not in this public rep
 |---|---|---|
 | `execution_mode` | `review_only` | Blocks live action until deliberately enabled. |
 | `allowed_tokens` | Empty | Only named tokens may reach a live review. |
-| `max_leverage` | `0` | Zero keeps live execution disabled. |
-| `max_margin_usdc` | `0` | Zero keeps live execution disabled. |
+| `max_leverage` | `0` | A positive finite number is required for live execution; zero keeps it disabled. |
+| `max_margin_usdc` | `0` | A positive finite USDC amount is required for live execution; zero keeps it disabled. |
 | `allowed_entry_modes` | `market,limit` | Restricts allowed order types. |
 | `setup_max_age_seconds` | `300` | Expires a setup after five minutes. |
 
@@ -20,5 +20,7 @@ Before setting `execution_mode` to `live`:
 3. Set a maximum margin.
 4. Complete a dry run that ends at review/cancel, not execution.
 5. Confirm the current TrueNorth UI shows all material values before its execution action.
+
+Live execution accepts only an exact positive numerical leverage and exact positive margin in USDC. A notional-only, estimated, ranged, zero, or missing value is rejected.
 
 A policy is a safety limit, not a recommendation or a promise of profit.
