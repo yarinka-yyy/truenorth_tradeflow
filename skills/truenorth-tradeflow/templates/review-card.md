@@ -32,7 +32,11 @@
 
 **Order-panel state:** `[not used; panel defaults are not setup evidence]`
 
-**Live eligibility:** `[review_only in 0.1.5 / rejected with reason]`
+**Future ticket-checkbox snapshot:** `[not used in review-only; re-read Reduce only, Take Profit / Stop Loss, Skip Open Order Confirmation=off, Attach an agent=off]`
+
+**Watcher state:** `[Customize and Start watching not invoked]`
+
+**Live eligibility:** `[review_only in 0.1.6 / rejected with reason]`
 
 **Decision:**
 
@@ -40,4 +44,4 @@
 - Cancel
 - Ask TrueNorth a follow-up
 
-> Version `0.1.5` does not invoke TrueNorth order controls. Any future approval is valid only for this exact card. A change to requested intent, market, side, entry, leverage, margin, SL, TP, fill boundary, limit expiry, or card expiry cancels it.
+> Version `0.1.6` does not invoke TrueNorth order controls. Any future approval is valid only for this exact card. A change to requested intent, market, side, entry, leverage, margin, SL, TP, fill boundary, limit expiry, or card expiry cancels it.

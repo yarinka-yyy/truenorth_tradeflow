@@ -18,8 +18,8 @@ An unofficial, review-first [Hermes Agent](https://hermes-agent.nousresearch.com
 - Opens only the exact TrueNorth origin, `https://truenorth.xyz`, during its browser workflow.
 - Does not handle seed phrases, private keys, wallet passwords, API keys, signatures, or 2FA.
 - Does not approve a wallet, browser permission, payment, or signing dialog.
-- Does not execute a trade in version `0.1.5`; a future flow must never execute from a routine, alert, stale approval, or ambiguous message.
-- Does not open, close, resize, average, reverse, or cancel a position in version `0.1.5`; a future flow must never do so outside an explicitly approved action.
+- Does not execute a trade in version `0.1.6`; a future flow must never execute from a routine, alert, stale approval, or ambiguous message.
+- Does not open, close, resize, average, reverse, or cancel a position in version `0.1.6`; a future flow must never do so outside an explicitly approved action.
 
 ## Install
 
@@ -31,7 +31,7 @@ The installer scans the skill before installing it. Do not bypass a security war
 
 ## First-time configuration
 
-The skill starts in `review_only` mode. These local limits are reserved for a future live release: set allowed tokens, maximum leverage, maximum margin, allowed entry modes, and setup freshness window. They do **not** unlock order execution in `0.1.5`; setting `execution_mode` to `live` is unsupported and has no effect. A future live release will require positive finite leverage and an exact positive margin in USDC; a notional-only setup cannot be opened. These settings live in the user's Hermes profile and are not part of this repository.
+The skill starts in `review_only` mode. These local limits are reserved for a future live release: set allowed tokens, maximum leverage, maximum margin, allowed entry modes, and setup freshness window. They do **not** unlock order execution in `0.1.6`; setting `execution_mode` to `live` is unsupported and has no effect. A future live release will require positive finite leverage and an exact positive margin in USDC; a notional-only setup cannot be opened. These settings live in the user's Hermes profile and are not part of this repository.
 
 ## Use
 
@@ -41,13 +41,13 @@ The skill starts in `review_only` mode. These local limits are reserved for a fu
 /truenorth-tradeflow Find a limit-level setup for $ETH.
 ```
 
-For a direct but ambiguous request such as “Open ETH,” Hermes asks whether the intent is **market now** or **limit level**. It never chooses one silently. In `0.1.5`, choose **Keep review-only** or **Ask TrueNorth a follow-up**; it will not place an order. If TrueNorth or a wallet shows a password, signature, permission, or 2FA prompt, the user handles it directly.
+For a direct but ambiguous request such as “Open ETH,” Hermes asks whether the intent is **market now** or **limit level**. It never chooses one silently. In `0.1.6`, choose **Keep review-only** or **Ask TrueNorth a follow-up**; it will not place an order. If TrueNorth or a wallet shows a password, signature, permission, or 2FA prompt, the user handles it directly.
 
 ## Prerequisites
 
 - Hermes with browser automation available.
 - An authenticated TrueNorth browser session.
-- No connected trading account is needed for `0.1.5` review-only use.
+- No connected trading account is needed for `0.1.6` review-only use.
 - User approval for any Chrome remote-debugging or wallet prompt.
 
 ## Browser boundary
@@ -71,7 +71,7 @@ skills/truenorth-tradeflow/
 
 ## Status
 
-`0.1.5` — review-only intent routing verified with one `market_now` analysis and one `limit_level` analysis. The market-now path can correctly return no trade rather than inventing a limit substitute; the limit-level path can return an exact resting limit, expiry/cancel condition, and an inline setup card. The order panel still differs from the AI setup and remains off-limits. **Edit**, **One-Click Setup**, **Place Order & Launch Agent**, and **Skip Open Order Confirmation** remain intentionally disabled. Setting `execution_mode` to `live` does not change that.
+`0.1.6` — review-only intent routing verified with one `market_now` analysis and one `limit_level` analysis. The market-now path can correctly return no trade rather than inventing a limit substitute; the limit-level path can return an exact resting limit, expiry/cancel condition, and an inline setup card. A ticket audit found that **Attach an agent** may be pre-enabled and **Customize** opens a watcher configuration with **Start watching**; neither is setup evidence. The order panel remains off-limits: **Edit**, **One-Click Setup**, **Place Order & Launch Agent**, **Skip Open Order Confirmation**, **Customize**, and **Start watching** stay disabled. Setting `execution_mode` to `live` does not change that.
 
 ## License
 
