@@ -49,7 +49,7 @@ Use this skill when the user wants a TrueNorth agent to research one token and p
 
 - Browser automation is available and the user has an authenticated TrueNorth session.
 - The user has handled any login, remote-debugging consent, wallet connection, or account setup themselves.
-- Version `0.1.6` is verified for analysis and review only. Its native order controls remain disabled because the live button semantics have not been safely mapped end-to-end. The UI audit found that a non-final **Customize** control opens a watcher dialog with **Start watching**, and that **Attach an agent** can be enabled by default; neither is part of a reviewed setup.
+- Version `0.1.6` is verified for analysis and review only. Its native order controls remain disabled because the live button semantics have not been safely mapped end-to-end. The authorized non-trading UI audit observed the rendered **Customize** control open a watcher dialog with **Start watching**, and **Attach an agent** enabled; neither observation is part of a reviewed setup.
 - A future live release must require a non-empty token allowlist plus positive, finite maximum leverage and maximum margin values.
 
 Never ask for or type a seed phrase, private key, wallet password, API key, signature, 2FA code, or recovery material. Never approve a wallet, browser permission, payment, or signing dialog.

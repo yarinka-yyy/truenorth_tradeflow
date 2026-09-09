@@ -71,7 +71,7 @@ skills/truenorth-tradeflow/
 
 ## Status
 
-`0.1.6` — review-only intent routing verified with one `market_now` analysis and one `limit_level` analysis. The market-now path can correctly return no trade rather than inventing a limit substitute; the limit-level path can return an exact resting limit, expiry/cancel condition, and an inline setup card. A ticket audit found that **Attach an agent** may be pre-enabled and **Customize** opens a watcher configuration with **Start watching**; neither is setup evidence. The order panel remains off-limits: **Edit**, **One-Click Setup**, **Place Order & Launch Agent**, **Skip Open Order Confirmation**, **Customize**, and **Start watching** stay disabled. Setting `execution_mode` to `live` does not change that.
+`0.1.6` — review-only intent routing verified with one `market_now` analysis and one `limit_level` analysis. The market-now path can correctly return no trade rather than inventing a limit substitute; the limit-level path can return an exact resting limit, expiry/cancel condition, and an inline setup card. An authorized non-trading ticket audit observed **Attach an agent** enabled and the rendered **Customize** control opening a watcher configuration with **Start watching**; neither observation is setup evidence. The order panel remains off-limits: **Edit**, **One-Click Setup**, **Place Order & Launch Agent**, **Skip Open Order Confirmation**, **Customize**, and **Start watching** stay disabled. Setting `execution_mode` to `live` does not change that.
 
 ## License
 
