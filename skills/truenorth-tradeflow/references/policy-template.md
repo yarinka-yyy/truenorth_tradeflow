@@ -1,31 +1,30 @@
-# Reserved future policy template
+# Local MVP policy template
 
-Keep personal values in the Hermes profile configuration, not in this public repository. This template does not enable order execution in version `0.1.6`.
+Keep personal values in the Hermes profile configuration, not in this public repository.
 
-| Setting | Safe initial value | Purpose |
+| Setting | Initial value | MVP behavior |
 |---|---|---|
-| `execution_mode` | `review_only` | The only supported mode in `0.1.6`; `live` is unsupported. |
-| `default_entry_intent` | `research_only` | Default for a bare analysis request. A direct trade request without intent always asks `market_now` or `limit_level`. |
-| `allowed_tokens` | Empty | Reserved for a future validated live release. |
-| `max_leverage` | `0` | Reserved for a future validated live release. |
-| `max_margin_usdc` | `0` | Reserved for a future validated live release. |
-| `allowed_entry_modes` | `market,limit` | Reserved for a future validated live release. |
-| `setup_max_age_seconds` | `300` | Expires a setup after five minutes. |
+| `execution_mode` | `review_only` | Default. `live_mvp` permits one current, user-confirmed order attempt. |
+| `default_entry_intent` | `research_only` | Bare analysis default. Direct trade requests ask market-now or limit-level unless the user delegates that choice now. |
+| `allowed_tokens` | Empty | Optional hard token allowlist when populated. |
+| `max_leverage` | `0` | Optional hard maximum. Zero means no configured cap. |
+| `max_margin_usdc` | `0` | Optional hard maximum against the ticket's displayed Margin Required. Zero means no configured cap. |
+| `allowed_entry_modes` | `market,limit` | Optional hard mode allowlist. |
+| `setup_max_age_seconds` | `300` | Expires a stale setup. |
 
-## Future live-release requirements
+## Minimal live-MVP requirements
 
-Do not set `execution_mode` to `live` in version `0.1.6`; it cannot authorize or execute an order. Before a later release may expose live execution, it must:
+`live_mvp` does not need a backend or a perfect universal UI model. It does require these practical checks for one current ticket:
 
-1. Set a non-empty token allowlist.
-2. Set a maximum leverage.
-3. Set a maximum margin.
-4. Complete a dry run that ends at review/cancel, not execution.
-5. Independently map the exact semantics of every order control and confirm that the current TrueNorth UI shows every material value before an execution action.
-6. Verify a matching order or position read-back after a deliberately authorized test; a button click or toast is never proof.
-7. For a market entry, enforce an exact maximum fill boundary. For a limit entry, enforce one exact price plus expiry or cancel condition. Never switch modes automatically.
-8. Confirm the proposed margin and maximum fees fit within the available-to-trade balance, confirm that **Skip Open Order Confirmation** is off, and explicitly set **Attach an agent** off unless a separate agent workflow was approved.
-9. Treat **Customize** as a potential watcher configuration, not a harmless advanced-order control; do not invoke **Start watching** during an order flow.
+1. One fresh analysis-only response for the chosen intent.
+2. A candidate card that the user sees before the ticket is prepared. `NO_TRADE_NOW` or `NO_LIMIT_SETUP` ends the attempt.
+3. Explicit ticket values: market, side, market/limit type, leverage, and Size unit/value.
+4. A live read of Order Value, Margin Required, fees, slippage, and all checkboxes. Size in USDC is not silently renamed to margin.
+5. If a positive local cap is configured, its corresponding ticket field must be exact, numeric, and within the cap. Missing, ranged, estimated, substituted, or out-of-cap values stop the attempt. A zero cap means the user deliberately uses the live ticket snapshot without that policy limit.
+6. **Reduce only** off for an opening order; **Skip Open Order Confirmation** off; **Attach an agent** off.
+7. Exact TP/SL fields only if enabled and populated from the reviewed setup. Never use **Customize** or **Start watching** in this order path.
+8. A final confirmation binds to the complete shown snapshot. Re-read it immediately before the one submit click; any changed field cancels that confirmation and requires a new snapshot and confirmation, then an Open Orders or Positions read-back.
 
-Any future live flow must accept only an exact positive numerical leverage and exact positive margin in USDC. A notional-only, estimated, ranged, zero, or missing value is rejected.
+## Not included
 
-A policy is a safety limit, not a recommendation or a promise of profit.
+V0.2.0 does not approve wallet prompts, sign transactions, retry a submission, or close/manage positions. A close flow needs an observed real position and its rendered controls.

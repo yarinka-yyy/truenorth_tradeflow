@@ -8,7 +8,7 @@
 - Keep the product TrueNorth-only: do not add direct Hyperliquid browsing, APIs, or signing.
 - Keep the browser origin exact: `https://truenorth.xyz` only; stop on off-origin redirects, popups, and links.
 - Preserve the approval-first workflow. No routine, alert, prior approval, or model inference can authorize a trade.
-- Never switch a user request between market-now and limit-level entry without a fresh explicit choice.
-- Do not enable or document an order-button click until its semantics and resulting order/position read-back have been independently verified.
+- Never switch a user request between market-now and limit-level entry without a fresh explicit choice, unless the user explicitly delegates that choice in the current request.
+- A live MVP may make one click on the currently rendered TrueNorth order-submit control only after a fresh setup and an exact, per-action user confirmation. Re-read Open Orders or Positions before reporting any result; never retry an uncertain submission.
 - Do not add a backend, MCP server, database, package dependency, or build system unless the user explicitly requests a later version.
 - Keep the direct install path valid: `owner/repo/skills/truenorth-tradeflow`.

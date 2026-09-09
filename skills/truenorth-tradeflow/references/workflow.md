@@ -7,26 +7,33 @@ IDLE
   -> ANALYSIS_REQUESTED
   -> RESPONSE_COMPLETE
   -> SETUP_CAPTURED
-  -> VALIDATED
-  -> AWAITING_USER_APPROVAL
-  -> REVIEW_COMPLETE
+  -> AWAITING_LIVE_MODE
+  -> TICKET_CONFIGURED
+  -> TICKET_READ_BACK
+  -> AWAITING_EXACT_CONFIRMATION
+  -> SUBMIT_REQUESTED
+  -> ORDER_OR_POSITION_READ_BACK
+  -> COMPLETE
 ```
+
+`review_only` transitions from `AWAITING_LIVE_MODE` directly to `COMPLETE`.
 
 Any state may end in:
 
 ```text
-CANCELLED | EXPIRED | REJECTED_BY_POLICY | NOT_EXECUTED | FAILED
+CANCELLED | EXPIRED | NOT_EXECUTED | FAILED
 ```
 
 ## Transition rules
 
-- `SAME_ORIGIN_VERIFIED` requires the exact parsed origin `https://truenorth.xyz`; every off-origin redirect, popup, or link transitions to `NOT_EXECUTED`.
-- `RESPONSE_COMPLETE` requires the streaming response to finish. A heading, badge, or action button alone is not a complete response.
-- A direct trade request without `market_now` or `limit_level` stays in `IDLE` until the user chooses one. A bare research request resolves to `research_only` unless a local default says otherwise.
-- `market_now` accepts only `NO_TRADE_NOW` or a market candidate with a reference price and maximum fill boundary. `limit_level` accepts only `NO_LIMIT_SETUP` or a limit candidate with one exact price and expiry or cancel condition. Never change the intent automatically.
-- Approval is fresh, single-use, setup-bound, and must expire at the earlier of the configured lifetime, the TrueNorth text validity window, and an inline-card countdown. Missing validity is not executable.
-- A changed token, direction, entry, leverage, margin, stop-loss, take-profit, or inline-card expiry invalidates approval.
-- A response/card conflict or an unknown UI state transitions to `REJECTED_BY_POLICY`; a disconnect, login wall, selector mismatch, stale data, or uncertain result transitions to `NOT_EXECUTED`.
-- A chat explanation that conflicts with the rendered ticket UI is a `REJECTED_BY_POLICY` condition. Before any later execution transition, the ticket must re-read **Reduce only**, **Take Profit / Stop Loss**, **Skip Open Order Confirmation**, and **Attach an agent**; no state may be inherited.
-- The rendered **Customize** control observed in the authorized audit is treated as a watcher entry point, not an order-editing safe action. **Start watching** transitions to `NOT_EXECUTED` unless a separately scoped watcher feature exists.
-- Version `0.1.6` transitions from `AWAITING_USER_APPROVAL` only to `REVIEW_COMPLETE`, `CANCELLED`, or `EXPIRED`. It never invokes the order panel. A future live state may be added only after independent mapping proves exact control semantics, sufficient available-to-trade balance, confirmation not skipped, and matching order/position read-back.
+- `SAME_ORIGIN_VERIFIED` requires the exact parsed origin `https://truenorth.xyz`. Any off-origin redirect, popup, or link becomes `NOT_EXECUTED`.
+- `RESPONSE_COMPLETE` requires the analysis stream to finish. A heading, badge, or button alone is not complete. Any conflict between completed response text and its inline setup card becomes `NOT_EXECUTED`; do not choose a value by inference.
+- A direct trade request without `market_now` or `limit_level` remains unresolved until the user selects one or explicitly delegates that choice in the current request. Never substitute a mode after `NO_TRADE_NOW` or `NO_LIMIT_SETUP`.
+- `TICKET_CONFIGURED` requires explicit market, side, order type, leverage, and Size unit/value. Do not inherit panel defaults.
+- `TICKET_READ_BACK` requires the current rendered Order Value, Margin Required, fees, slippage, **Reduce only**, **Take Profit / Stop Loss**, **Skip Open Order Confirmation**, and **Attach an agent** state. The ticket display, not a chat explanation, is the source for these fields. A configured token/mode allowlist must contain the exact ticket value, and a positive configured leverage or margin cap requires a single numeric matching ticket field within that cap; otherwise become `NOT_EXECUTED`.
+- `AWAITING_EXACT_CONFIRMATION` shows the setup and complete ticket snapshot together. The confirmation binds only to its market, side, order type, leverage, Size unit/value, Order Value, Margin Required, fees, slippage, all four checkbox states, TP/SL values, current submit label, and setup expiry.
+- `SUBMIT_REQUESTED` re-reads every confirmation-bound field immediately before clicking the current rendered TrueNorth submit control once. Any difference cancels the authorization, returns to `TICKET_READ_BACK`, and requires a new snapshot and exact confirmation. Wallet, signature, permission, password, and 2FA prompts are user actions; their appearance ends Hermes interaction.
+- `ORDER_OR_POSITION_READ_BACK` requires a new matching Open Order or Position. A click, toast, wallet prompt, or review screen is not sufficient.
+- Missing read-back, disconnect, stale setup, selector mismatch, or an uncertain result is `NOT_EXECUTED`. Never retry automatically.
+- The observed **Customize** control opened a watcher configuration in one audit and remains outside the order path. **Start watching** is never clicked.
+- V0.2.0 has no position-management transition. Closing, resizing, reversing, averaging, and cancelling remain out of scope until a live pilot exposes their actual controls.

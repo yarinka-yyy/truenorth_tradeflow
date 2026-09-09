@@ -1,25 +1,26 @@
 # TrueNorth TradeFlow
 
-An unofficial, review-first [Hermes Agent](https://hermes-agent.nousresearch.com/) skill for turning a TrueNorth trade analysis into a structured review flow inside the already connected TrueNorth interface.
+An unofficial [Hermes Agent](https://hermes-agent.nousresearch.com/) skill for researching a TrueNorth setup and, in a deliberately small `live_mvp` mode, attempting one user-confirmed order through the already connected TrueNorth interface.
 
-> TrueNorth TradeFlow automates repetitive browser work. It is not financial advice, does not guarantee outcomes, and never removes the user's final decision.
+> This is browser automation, not financial advice. It does not predict profit or remove the user's final decision.
 
 ## What it does
 
 1. Distinguishes `research_only`, `market_now`, and `limit_level` requests.
-2. Asks one question when a direct trade request does not state market-now or limit-level intent.
-3. Opens TrueNorth and uses the matching analysis-only prompt.
-4. Returns a compact review card with side, entry, stop-loss, take-profit, invalidation, expiry, and requested intent.
-5. Keeps the result review-only in the current release; it does not click a TrueNorth order control.
+2. Uses one analysis-only TrueNorth request for the chosen intent.
+3. Returns a review card with the setup and a separate live-ticket snapshot.
+4. In `live_mvp`, fills one TrueNorth ticket, shows its displayed order value, margin, fees, slippage, and protection settings, then waits for an exact final confirmation.
+5. Makes at most one current rendered submit-button click and reads back Open Orders or Positions before reporting the outcome.
 
-## What it never does
+## MVP boundary
 
-- Does not navigate directly to Hyperliquid or use a Hyperliquid API.
-- Opens only the exact TrueNorth origin, `https://truenorth.xyz`, during its browser workflow.
-- Does not handle seed phrases, private keys, wallet passwords, API keys, signatures, or 2FA.
-- Does not approve a wallet, browser permission, payment, or signing dialog.
-- Does not execute a trade in version `0.1.6`; a future flow must never execute from a routine, alert, stale approval, or ambiguous message.
-- Does not open, close, resize, average, reverse, or cancel a position in version `0.1.6`; a future flow must never do so outside an explicitly approved action.
+`live_mvp` is intentionally narrow:
+
+- It opens at most one current, user-confirmed order attempt.
+- It stays on the exact browser origin `https://truenorth.xyz`; it never opens a direct Hyperliquid page or API.
+- It never handles seed phrases, private keys, passwords, signatures, permissions, 2FA, or wallet approval. The user performs any wallet action themselves.
+- It does not retry an uncertain submission.
+- It does **not** yet close, resize, reverse, average, or cancel a position. Those controls will be added only after a live pilot position exposes and validates the real close UI.
 
 ## Install
 
@@ -27,11 +28,13 @@ An unofficial, review-first [Hermes Agent](https://hermes-agent.nousresearch.com
 hermes skills install yarinka-yyy/truenorth_tradeflow/skills/truenorth-tradeflow
 ```
 
-The installer scans the skill before installing it. Do not bypass a security warning with `--force` unless you have inspected and accepted the exact finding.
+The installer scans the skill. Do not use `--force` as a routine install path.
 
-## First-time configuration
+## Configuration
 
-The skill starts in `review_only` mode. These local limits are reserved for a future live release: set allowed tokens, maximum leverage, maximum margin, allowed entry modes, and setup freshness window. They do **not** unlock order execution in `0.1.6`; setting `execution_mode` to `live` is unsupported and has no effect. A future live release will require positive finite leverage and an exact positive margin in USDC; a notional-only setup cannot be opened. These settings live in the user's Hermes profile and are not part of this repository.
+The default remains `review_only`. Set `execution_mode` to `live_mvp` only for one present, user-confirmed ticket. `allowed_tokens`, maximum leverage, maximum margin, allowed entry modes, and setup lifetime are local preferences stored in the user's Hermes profile, not in this repository.
+
+A configured token/mode allowlist or positive leverage/margin limit is a hard execution check. The matching live-ticket field must be exact and, where numeric, a single value within the limit. Leave an optional limit unset (`0`) or an allowlist blank if the user wants to decide from the current ticket snapshot instead. The ticket's displayed **Order Value**, **Margin Required**, fees, and slippage are always shown immediately before submission.
 
 ## Use
 
@@ -41,37 +44,26 @@ The skill starts in `review_only` mode. These local limits are reserved for a fu
 /truenorth-tradeflow Find a limit-level setup for $ETH.
 ```
 
-For a direct but ambiguous request such as “Open ETH,” Hermes asks whether the intent is **market now** or **limit level**. It never chooses one silently. In `0.1.6`, choose **Keep review-only** or **Ask TrueNorth a follow-up**; it will not place an order. If TrueNorth or a wallet shows a password, signature, permission, or 2FA prompt, the user handles it directly.
+For an ambiguous request such as “Open ETH,” Hermes asks whether the intent is **market now** or **limit level**, unless the user explicitly delegates that choice in the current request. A `NO_TRADE_NOW` or `NO_LIMIT_SETUP` result ends that attempt; it never silently substitutes the other mode.
 
-## Prerequisites
+## Live MVP sequence
 
-- Hermes with browser automation available.
-- An authenticated TrueNorth browser session.
-- No connected trading account is needed for `0.1.6` review-only use.
-- User approval for any Chrome remote-debugging or wallet prompt.
+1. Ask TrueNorth once for a fresh analysis-only setup.
+2. Show the setup card and, if the user chooses `live_mvp`, fill the current ticket explicitly.
+3. Show the ticket snapshot: market, side, type, leverage, size unit/value, displayed order value, displayed margin, TP/SL, fee, slippage, and the current submit-button label.
+4. Require the user to confirm that exact snapshot.
+5. Click only that current rendered submit control once if its immediate re-read matches the confirmed snapshot exactly. If any field differs, cancel the confirmation and show a new snapshot instead. The user handles any external wallet prompt.
+6. Read back Open Orders or Positions. A click, toast, wallet prompt, or review panel alone is not proof of execution.
 
 ## Browser boundary
 
-The skill starts at `https://truenorth.xyz/` and permits only paths whose parsed origin remains exactly `https://truenorth.xyz`. It stops on every off-origin redirect, popup, or link, including direct Hyperliquid and wallet routes.
+The skill begins at `https://truenorth.xyz/` and permits only paths whose parsed origin remains exactly `https://truenorth.xyz`. It stops on every off-origin redirect, popup, or link, including wallet and direct Hyperliquid routes.
 
-This is a documented skill rule, not a technical browser sandbox. A future local guard must enforce it in code before live trading is supported.
-
-## Repository layout
-
-```text
-skills/truenorth-tradeflow/
-├── SKILL.md
-├── references/
-│   ├── policy-template.md
-│   ├── prompt-template.md
-│   └── workflow.md
-└── templates/
-    └── review-card.md
-```
+This is an MVP workflow rule, not a technical browser sandbox.
 
 ## Status
 
-`0.1.6` — review-only intent routing verified with one `market_now` analysis and one `limit_level` analysis. The market-now path can correctly return no trade rather than inventing a limit substitute; the limit-level path can return an exact resting limit, expiry/cancel condition, and an inline setup card. An authorized non-trading ticket audit observed **Attach an agent** enabled and the rendered **Customize** control opening a watcher configuration with **Start watching**; neither observation is setup evidence. The order panel remains off-limits: **Edit**, **One-Click Setup**, **Place Order & Launch Agent**, **Skip Open Order Confirmation**, **Customize**, and **Start watching** stay disabled. Setting `execution_mode` to `live` does not change that.
+`0.2.0` — live-MVP ticket mapping completed on one authenticated TrueNorth screen without a submission: a ticket at `2x` with `Size = 10 USDC` displayed `Order Value = 10.00 USDC` and `Margin Required = 5.00 USDC`; disabling the initially enabled **Attach an agent** checkbox changed the current submit label to **Place Order on Hyperliquid**; enabling TP/SL exposed TP Price, Gain, SL Price, and Loss fields. These are observations of that rendered ticket, not universal UI guarantees. No order, position, watcher, signature, or wallet action was created during mapping.
 
 ## License
 
