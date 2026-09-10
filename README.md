@@ -10,7 +10,7 @@ An unofficial [Hermes Agent](https://hermes-agent.nousresearch.com/) skill for r
 2. Uses one analysis-only TrueNorth request for the chosen intent.
 3. Returns a review card with the setup and a separate live-ticket snapshot.
 4. In `live_mvp`, fills one TrueNorth ticket, shows its displayed order value, margin, fees, slippage, and protection settings, then waits for an exact final confirmation.
-5. Makes at most one current rendered submit-button click and reads back Open Orders or Positions before reporting the outcome.
+5. Clicks one current ticket submit control and, only if TrueNorth then renders a separate order-confirmation screen, obtains a new exact confirmation before its one final action click. It reads back Open Orders or Positions before reporting the outcome.
 
 ## MVP boundary
 
@@ -52,8 +52,8 @@ For an ambiguous request such as “Open ETH,” Hermes asks whether the intent 
 2. Show the setup card and, if the user chooses `live_mvp`, fill the current ticket explicitly.
 3. Show the ticket snapshot: market, side, type, leverage, size unit/value, displayed order value, displayed margin, TP/SL, fee, slippage, and the current submit-button label.
 4. Require the user to confirm that exact snapshot.
-5. Click only that current rendered submit control once if its immediate re-read matches the confirmed snapshot exactly. If any field differs, cancel the confirmation and show a new snapshot instead. The user handles any external wallet prompt.
-6. Read back Open Orders or Positions. A click, toast, wallet prompt, or review panel alone is not proof of execution.
+5. Click only that current rendered ticket-submit control once if its immediate re-read matches the confirmed snapshot exactly. If it opens a TrueNorth order-confirmation screen rather than executing, read that screen as a new snapshot. Any difference in its action, token size, estimated execution, value, margin, liquidation, slippage, protections, fees, or final button label cancels the earlier authorization. Show the confirmation snapshot and obtain a new exact approval before one final action click. The user handles any external wallet prompt.
+6. Read back Open Orders or Positions. A ticket click, confirmation screen, toast, wallet prompt, or review panel alone is not proof of execution.
 
 ## Browser boundary
 
@@ -63,7 +63,7 @@ This is an MVP workflow rule, not a technical browser sandbox.
 
 ## Status
 
-`0.2.0` — live-MVP ticket mapping completed on one authenticated TrueNorth screen without a submission: a ticket at `2x` with `Size = 10 USDC` displayed `Order Value = 10.00 USDC` and `Margin Required = 5.00 USDC`; disabling the initially enabled **Attach an agent** checkbox changed the current submit label to **Place Order on Hyperliquid**; enabling TP/SL exposed TP Price, Gain, SL Price, and Loss fields. These are observations of that rendered ticket, not universal UI guarantees. No order, position, watcher, signature, or wallet action was created during mapping.
+`0.2.1` — adds an observed confirmation-layer rule. On one rendered screen, the first ticket submit control opened an on-origin **Confirm Market Order** screen rather than proving execution. It displayed exchange, action, token size, estimated execution, order value, margin, liquidation, slippage, protection fields, fees, and a separate final action button. The confirmation was cancelled after its live execution terms differed from the prior setup; no order or position was created. This is one rendered-screen observation, not a universal UI guarantee.
 
 ## License
 

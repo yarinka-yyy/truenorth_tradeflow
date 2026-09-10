@@ -51,10 +51,28 @@
 
 **Final live confirmation:** `[Confirm exactly this ticket / Cancel]`
 
+## Platform confirmation — only if rendered after the ticket click
+
+| Field | Current rendered confirmation |
+|---|---|
+| Exchange | `[read back]` |
+| Action | `[read back]` |
+| Token size | `[unit and value]` |
+| Estimated execution | `[read back]` |
+| Order Value / Margin Required | `[read back]` |
+| Estimated liquidation | `[read back]` |
+| Fees / slippage | `[read back]` |
+| Reduce only | `[read back]` |
+| TP/SL | `[read back]` |
+| Skip Open Order Confirmation | `[read back]` |
+| Final action label | `[current rendered label]` |
+
+**Final platform confirmation:** `[Confirm exactly this confirmation / Cancel]`
+
 ## Result
 
 - **Review-only:** `[kept / cancelled / follow-up requested]`
 - **Live MVP:** `[not submitted / Open Order read back / Position read back / NOT_EXECUTED]`
 - **Observed order or position:** `[only after read-back]`
 
-> A candidate card does not populate the ticket. A ticket click, toast, wallet prompt, or review screen does not prove execution. Any change to intent, market, side, order type, leverage, size unit/value, Order Value, Margin Required, fees, slippage, any protection checkbox, TP/SL, current submit label, or expiry invalidates the final confirmation and requires a new live-ticket snapshot.
+> A candidate card does not populate the ticket. A ticket click, a platform-confirmation screen, toast, wallet prompt, or review screen does not prove execution. Any change to intent, market, side, order type, leverage, size unit/value, Order Value, Margin Required, fees, slippage, any protection checkbox, TP/SL, current submit label, or expiry invalidates the corresponding confirmation and requires a new snapshot. A rendered platform confirmation is a separate action and needs its own exact approval.

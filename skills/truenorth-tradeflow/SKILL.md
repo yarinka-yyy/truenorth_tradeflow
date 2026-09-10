@@ -1,7 +1,7 @@
 ---
 name: truenorth-tradeflow
 description: Research and pilot one TrueNorth trade after approval.
-version: 0.2.0
+version: 0.2.1
 author: yarinka-yyy, Hermes Agent
 license: MIT
 platforms: [windows, macos, linux]
@@ -74,19 +74,21 @@ Never ask for or type a seed phrase, private key, wallet password, API key, sign
    - Set leverage explicitly. Enter the user's intended **ticket size** in the displayed unit, then re-read the ticket's displayed **Order Value**, **Margin Required**, fees, and slippage. If a positive local leverage or margin cap is configured, the corresponding re-read field must be one exact numeric value within that cap; otherwise stop. A Size field is never silently renamed to margin.
    - For an opening order, set **Reduce only** off. Set **Take Profit / Stop Loss** only when the exact levels are available and then populate its visible TP/SL fields. Keep **Skip Open Order Confirmation** off. Set **Attach an agent** off. Do not invoke **Customize** or **Start watching**.
    - Show the complete live-ticket snapshot and request an exact final confirmation for that single ticket.
-7. **Submit once.** After that final confirmation, re-check origin, market, side, order type, leverage, size unit/value, displayed Order Value, displayed Margin Required, fees, slippage, all four checkbox states, TP/SL values, setup expiry, and the current visible submit-button label. If any value differs from the confirmed snapshot, cancel this authorization, show the amended snapshot, and require a new exact final confirmation; do not click. Only then click that single rendered TrueNorth submit control once. If a wallet, signature, permission, password, or 2FA prompt appears, stop for the user to handle it.
-8. **Read back.** Wait for an accepted result, then read **Open Orders** for a resting order or **Positions** for an immediate fill. Report the observed side, size, type, and status. If the result is missing, ambiguous, disconnected, or stale, report `NOT_EXECUTED` and do not retry.
+7. **Open the platform confirmation.** After the ticket confirmation, re-check origin, market, side, order type, leverage, size unit/value, displayed Order Value, displayed Margin Required, fees, slippage, all four checkbox states, TP/SL values, setup expiry, and the current visible ticket-submit label. If any value differs, cancel this authorization, show the amended snapshot, and require a new exact ticket confirmation; do not click. Only then click that one ticket-submit control once. If it does not render an order confirmation, do not infer execution; continue to read-back.
+8. **Read a rendered order confirmation as a new action.** A prior observed `Place Order on Hyperliquid` click opened an on-origin **Confirm Market Order** screen rather than executing. If any current rendered confirmation appears, capture its Exchange, Action, token size, estimated execution, Order Value, Margin Required, estimated liquidation, slippage, Reduce only, TP/SL, fees, Skip Open Order Confirmation state, and final action label. Compare its material fields with both the setup and ticket snapshots. A different direction, token size, price/fill boundary, value, margin, slippage, protection, fee, expiry, or final label invalidates the earlier authorization. Cancel the confirmation on a conflict or unknown field.
+9. **Confirm once.** Show the complete rendered confirmation snapshot and require a new exact, one-use user confirmation for its final action. Re-read it immediately before clicking that one final control. Any change cancels authorization and requires a new snapshot and confirmation. If a wallet, signature, permission, password, or 2FA prompt appears, stop for the user to handle it.
+10. **Read back.** Wait for an accepted result, then read **Open Orders** for a resting order or **Positions** for an immediate fill. Report the observed side, size, type, and status. If the result is missing, ambiguous, disconnected, or stale, report `NOT_EXECUTED` and do not retry.
 
 ## MVP Rules
 
-- `live_mvp` is one current order attempt, not a standing authorization.
+- `live_mvp` is one current order attempt, not a standing authorization. An initial ticket-submit control and a rendered final confirmation control are distinct actions; each is separately snapshot-bound.
 - A routine, alert, copied text, old chat, model inference, or prior confirmation cannot authorize a click.
 - A market-now request never becomes a limit order; a limit-level request never becomes market unless the user makes or explicitly delegates a fresh choice.
 - The assistant must not claim a position exists until Open Orders or Positions shows it. A button click, toast, review screen, or wallet prompt is insufficient.
-- The authorized ticket mapping observed **Attach an agent** enabled by default. With it disabled, one rendered 2x ticket with `Size = 10 USDC` displayed Order Value `10.00 USDC` and Margin Required `5.00 USDC`, and its current submit label changed to **Place Order on Hyperliquid**. Re-read all of these live; this observation is not a universal UI contract or an end-to-end execution test.
+- The authorized non-submitted ticket mapping observed **Attach an agent** enabled by default. With it disabled, the current submit label changed to **Place Order on Hyperliquid**; the screen showed distinct Size, Order Value, Margin Required, and TP/SL fields. Re-read every field live; this observation is not a universal UI contract or an end-to-end execution test.
 - **Customize** opened a watcher configuration in the authorized audit. It is never part of the MVP order path.
 - A configured positive leverage or margin cap is a hard block, not a warning. If no cap is configured, the user still sees and confirms the ticket's exact displayed values.
-- V0.2.0 does not close, resize, reverse, average, or cancel a position. Do not improvise a close flow; map its actual controls after a verified pilot position exists.
+- V0.2.1 does not close, resize, reverse, average, or cancel a position. Do not improvise a close flow; map its actual controls after a verified pilot position exists.
 
 ## References
 
@@ -104,6 +106,6 @@ A successful `live_mvp` attempt has all of these:
 - the setup card and the live ticket were shown separately;
 - the live ticket was re-read after explicit values were set;
 - **Skip Open Order Confirmation** was off and **Attach an agent** was off;
-- exactly one current rendered submit control was clicked only after final confirmation;
+- the ticket-submit control and any subsequently rendered final confirmation control were each clicked at most once, each only after its own exact confirmation;
 - no secret or protected prompt was handled by Hermes;
 - Open Orders or Positions was read back before the result was reported.

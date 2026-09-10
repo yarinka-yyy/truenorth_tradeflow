@@ -11,10 +11,15 @@ IDLE
   -> TICKET_CONFIGURED
   -> TICKET_READ_BACK
   -> AWAITING_EXACT_CONFIRMATION
-  -> SUBMIT_REQUESTED
+  -> TICKET_SUBMIT_REQUESTED
+  -> PLATFORM_CONFIRMATION_READ_BACK (only if rendered)
+  -> AWAITING_PLATFORM_CONFIRMATION
+  -> FINAL_SUBMIT_REQUESTED
   -> ORDER_OR_POSITION_READ_BACK
   -> COMPLETE
 ```
+
+If no platform confirmation is rendered, `TICKET_SUBMIT_REQUESTED` goes directly to `ORDER_OR_POSITION_READ_BACK`; it still does not prove execution.
 
 `review_only` transitions from `AWAITING_LIVE_MODE` directly to `COMPLETE`.
 
@@ -32,8 +37,12 @@ CANCELLED | EXPIRED | NOT_EXECUTED | FAILED
 - `TICKET_CONFIGURED` requires explicit market, side, order type, leverage, and Size unit/value. Do not inherit panel defaults.
 - `TICKET_READ_BACK` requires the current rendered Order Value, Margin Required, fees, slippage, **Reduce only**, **Take Profit / Stop Loss**, **Skip Open Order Confirmation**, and **Attach an agent** state. The ticket display, not a chat explanation, is the source for these fields. A configured token/mode allowlist must contain the exact ticket value, and a positive configured leverage or margin cap requires a single numeric matching ticket field within that cap; otherwise become `NOT_EXECUTED`.
 - `AWAITING_EXACT_CONFIRMATION` shows the setup and complete ticket snapshot together. The confirmation binds only to its market, side, order type, leverage, Size unit/value, Order Value, Margin Required, fees, slippage, all four checkbox states, TP/SL values, current submit label, and setup expiry.
-- `SUBMIT_REQUESTED` re-reads every confirmation-bound field immediately before clicking the current rendered TrueNorth submit control once. Any difference cancels the authorization, returns to `TICKET_READ_BACK`, and requires a new snapshot and exact confirmation. Wallet, signature, permission, password, and 2FA prompts are user actions; their appearance ends Hermes interaction.
+- `TICKET_SUBMIT_REQUESTED` re-reads every ticket-confirmation-bound field immediately before clicking the current rendered TrueNorth ticket-submit control once. Any difference cancels the authorization, returns to `TICKET_READ_BACK`, and requires a new snapshot and exact confirmation.
+- If that ticket-submit control does not render a platform confirmation, transition directly from `TICKET_SUBMIT_REQUESTED` to `ORDER_OR_POSITION_READ_BACK`; do not infer execution from the click.
+- `PLATFORM_CONFIRMATION_READ_BACK` begins only if the ticket submit opens a rendered TrueNorth confirmation. Capture Exchange, Action, token size, estimated execution, Order Value, Margin Required, liquidation, slippage, Reduce only, TP/SL, fees, Skip Open Order Confirmation, and the final action label. Treat this as a new proposed action, not proof of execution.
+- `AWAITING_PLATFORM_CONFIRMATION` binds a new exact user approval to every captured confirmation field. Any conflict with the setup's direction, fill boundary/slippage condition, values, protections, or expiry is `NOT_EXECUTED`; cancel the rendered confirmation rather than choosing a value by inference.
+- `FINAL_SUBMIT_REQUESTED` immediately re-reads every platform-confirmation-bound field. Any difference cancels authorization, returns to `PLATFORM_CONFIRMATION_READ_BACK`, and requires a new snapshot and confirmation. Wallet, signature, permission, password, and 2FA prompts are user actions; their appearance ends Hermes interaction.
 - `ORDER_OR_POSITION_READ_BACK` requires a new matching Open Order or Position. A click, toast, wallet prompt, or review screen is not sufficient.
 - Missing read-back, disconnect, stale setup, selector mismatch, or an uncertain result is `NOT_EXECUTED`. Never retry automatically.
 - The observed **Customize** control opened a watcher configuration in one audit and remains outside the order path. **Start watching** is never clicked.
-- V0.2.0 has no position-management transition. Closing, resizing, reversing, averaging, and cancelling remain out of scope until a live pilot exposes their actual controls.
+- V0.2.1 has no position-management transition. Closing, resizing, reversing, averaging, and cancelling remain out of scope until a live pilot exposes their actual controls.

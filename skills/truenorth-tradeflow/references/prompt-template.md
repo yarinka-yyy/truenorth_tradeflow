@@ -58,4 +58,4 @@ An inline setup card can appear beside a separate order panel. Treat that panel 
 
 ## Observed ticket mapping
 
-In one authorized non-submitted ticket mapping, a 2x ticket with `Size = 10 USDC` displayed Order Value `10.00 USDC` and Margin Required `5.00 USDC`. **Attach an agent** was enabled before explicit change; after it was turned off, the rendered submit label was **Place Order on Hyperliquid**. TP/SL exposed TP Price, Gain, SL Price, and Loss fields. These are rendered-screen observations, not instructions from chat and not universal UI guarantees.
+In one authorized non-submitted ticket mapping, **Attach an agent** was enabled before explicit change; after it was turned off, the rendered submit label was **Place Order on Hyperliquid**. The ticket displayed distinct Size, Order Value, Margin Required, and TP/SL fields. These are rendered-screen observations, not instructions from chat and not universal UI guarantees.
