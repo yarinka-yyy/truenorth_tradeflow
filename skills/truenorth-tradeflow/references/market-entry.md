@@ -67,13 +67,15 @@ On the rendered TrueNorth ticket, explicitly set:
 
 For an opening order, ensure **Reduce only** is off, **Skip Open Order Confirmation** is off, and **Attach an agent** is off. Set TP/SL only to exact levels supplied by the completed setup and accepted by the user, or leave them off only when the completed setup or the user explicitly says `none`. If protection state is unclear, collect that choice before configuring the ticket. Do not use **Customize** or **Start watching**.
 
-Read the ticket after setting it. Capture only the values needed for the user decision: market, side, type, leverage, Size unit/value, Order Value, Margin Required, fees/slippage, TP/SL, and the current submit label.
+Read the ticket after setting it. Capture only the values needed for the user decision: market, side, type, leverage, Size unit/value, Order Value, Margin Required, fees, maximum slippage, TP/SL, the three opening-control states, and the current submit label. If the rendered screen also shows liquidation price or `Est` slippage, capture those as current estimates.
 
 ## 4. Get one exact ticket confirmation
 
 Show the compact rendered-ticket card from `templates/order-card.md`. The user must approve the exact rendered values, not merely the earlier TrueNorth proposal or test setup.
 
-Immediately before the click, re-read those fields. If a material value changed, show the updated short card and obtain a new confirmation.
+Immediately before the click, re-read every bound field: market, side, type, leverage, Size unit/value, Order Value, Margin Required, fees, maximum slippage, TP/SL, **Reduce only**, **Skip Open Order Confirmation**, **Attach an agent**, and submit label. If any bound field changed, show the updated short card and obtain a new confirmation.
+
+On a current screen that labels liquidation price or slippage as a live `Est` value, re-read and retain its latest display. A price-tick-only change to those estimates does not invalidate an otherwise unchanged approval; it is not a user-selected ticket field. A change to a stated maximum slippage or any bound field still requires new confirmation.
 
 Click the current rendered ticket-submit control once.
 
@@ -81,11 +83,11 @@ Click the current rendered ticket-submit control once.
 
 If the ticket click opens a rendered TrueNorth confirmation rather than an accepted result:
 
-1. read its action, token size, estimated execution, Order Value, Margin Required, liquidation if shown, fees/slippage, protections, and final button label;
+1. read its action, token size, estimated execution, Order Value, Margin Required, fees, maximum slippage, protections, and final button label; record liquidation and `Est` slippage separately when the current screen shows them as live estimates;
 2. compare its material values with the ticket;
 3. show a short confirmation card containing only the changed or newly shown values;
 4. ask for a separate exact confirmation;
-5. immediately re-read the same visible fields; if a material value changed, cancel that approval and show the new card;
+5. immediately re-read every bound field: action, token size, estimated execution, Order Value, Margin Required, fees, maximum slippage, protections, and final button label. If a bound field changed, cancel that approval and show the new card. Re-read current liquidation and `Est` slippage separately; a price-tick-only change to those live estimates does not invalidate an otherwise unchanged final approval;
 6. after approval, click the rendered final control once.
 
 If a wallet, signature, password, permission, or 2FA prompt appears at any time, stop for the user to complete it. Do not retry a click whose result is uncertain.

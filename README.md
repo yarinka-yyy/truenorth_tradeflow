@@ -49,13 +49,18 @@ The labels below are English only as documentation. Hermes writes the actual car
 - Leverage: `[rendered leverage]`
 - Size: `[rendered Size unit and value]`
 - Ticket: `Order Value [rendered value]`, `Margin Required [rendered value]`
+- Fees: `[rendered values]`
+- Maximum slippage: `[rendered maximum]`
+- Live estimates: `[liquidation and Est slippage, if shown]`
 - Protection: `[rendered SL/TP or none]`
+- Opening controls: `Reduce only [on/off]`, `Skip Open Order Confirmation [on/off]`, `Attach an agent [on/off]`
+- Submit control: `[rendered label]`
 - Why: `[one short TrueNorth reason]`
 
 Confirm this exact market order?
 ```
 
-The values are always read from the current rendered ticket. Hermes does not assume a formula or reuse an old setup.
+The values are always read from the current rendered ticket. Hermes does not assume a formula or reuse an old setup. When the current screen separately labels liquidation or `Est` slippage as a live estimate, that estimate is re-read and reported but a price-tick-only refresh does not itself replace any other user-approved bound ticket field, including selections, displayed Order Value/Margin/fees, or stated maximum slippage.
 
 ## Current scope
 
@@ -72,7 +77,7 @@ The values are always read from the current rendered ticket. Hermes does not ass
 
 ## Status
 
-`0.3.1` — market-first MVP with an explicit lifecycle-test setup path. It intentionally favors one clear opening path over a large policy engine or unverified position-management features.
+`0.3.2` — market-first MVP with an explicit lifecycle-test setup path and live-estimate handling that avoids repeated approval loops. It intentionally favors one clear opening path over a large policy engine or unverified position-management features.
 
 ## License
 

@@ -49,11 +49,17 @@ This is a real interface/lifecycle test, not a trading recommendation. The rende
 - Size: `[rendered Size unit and value]`
 - Order Value: `[rendered value]`
 - Margin Required: `[rendered value]`
-- Fees / Slippage: `[rendered values]`
+- Fees: `[rendered values]`
+- Maximum slippage: `[rendered maximum]`
+- Live estimates: `[liquidation and Est slippage, if the screen shows them]`
 - Protection: `[rendered TP/SL or none]`
+- Opening controls: `Reduce only [on/off]`, `Skip Open Order Confirmation [on/off]`, `Attach an agent [on/off]`
+- Submit control: `[rendered label]`
 
 Confirm this exact market order?
 ```
+
+If the screen labels liquidation or slippage as a live estimate, include its latest value for visibility. A price-tick-only change to that estimate is re-read and reported; any changed bound field — selected field, Order Value, Margin Required, fee, opening control, submit label, or stated maximum — requires a replacement approval.
 
 ## Rendered final confirmation
 

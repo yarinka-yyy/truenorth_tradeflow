@@ -1,7 +1,7 @@
 ---
 name: truenorth-tradeflow
 description: Open TrueNorth market orders after user approval.
-version: 0.3.1
+version: 0.3.2
 author: yarinka-yyy, Hermes Agent
 license: MIT
 platforms: [windows, macos, linux]
@@ -32,7 +32,7 @@ Do not use this skill for direct Hyperliquid navigation, exchange APIs, wallet s
 2. Send one consolidated TrueNorth request for the current market attempt. For a normal request, ask for a market proposal. For an explicit user-requested lifecycle test, ask for a concrete `MARKET_TEST_SETUP` even if ordinary strategy quality is weak. This applies only to the current request; it is not saved configuration.
 3. Keep market and limit distinct. If the user asks for a limit order, say that this market-first release does not yet support it; never silently substitute a market order.
 4. Show the user a compact card in their language. Preserve the full completed TrueNorth result only as execution data; do not dump its chat text into the reply.
-5. The user approves the exact displayed ticket, not a previous suggestion. A changed ticket requires a new confirmation.
+5. The user approves the exact displayed ticket, not a previous suggestion. A changed bound ticket field, including a user-controlled selection, displayed Order Value/Margin/fee, or stated maximum, requires a new confirmation; only a current screen's UI-labelled live liquidation or `Est` slippage estimate is re-read and reported without becoming a changed bound field.
 6. If TrueNorth renders a separate order-confirmation screen, treat it as a new action: show its material values, get a separate confirmation, then re-read it before one final click.
 7. The user handles every wallet, signature, password, permission, or 2FA prompt. Never type or approve one.
 8. After any submit click, read the rendered **Open Orders** and **Current Position** before claiming an order or position exists.
