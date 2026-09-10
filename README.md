@@ -6,8 +6,8 @@ An unofficial [Hermes Agent](https://hermes-agent.nousresearch.com/) skill for r
 
 ## What it does
 
-1. Distinguishes `research_only`, `market_now`, and `limit_level` requests.
-2. Uses one analysis-only TrueNorth request for the chosen intent.
+1. Distinguishes `research_only`, `market_now`, `limit_level`, and explicit `functional_test` requests.
+2. Uses one analysis-only TrueNorth request for a research, market-now, or limit-level intent; a separately explicit `functional_test` tests the order lifecycle without presenting stale or absent analysis data as a trade signal.
 3. Returns a review card with the setup and a separate live-ticket snapshot.
 4. In `live_mvp`, fills one TrueNorth ticket, shows its displayed order value, margin, fees, slippage, and protection settings, then waits for an exact final confirmation.
 5. Clicks one current ticket submit control and, only if TrueNorth then renders a separate order-confirmation screen, obtains a new exact confirmation before its one final action click. It reads back Open Orders or Positions before reporting the outcome.
@@ -42,18 +42,23 @@ A configured token/mode allowlist or positive leverage/margin limit is a hard ex
 /truenorth-tradeflow Analyze $ETH.
 /truenorth-tradeflow Find a market-now setup for $ETH.
 /truenorth-tradeflow Find a limit-level setup for $ETH.
+/truenorth-tradeflow Run a functional market-order lifecycle test for $ETH.
 ```
 
-For an ambiguous request such as “Open ETH,” Hermes asks whether the intent is **market now** or **limit level**, unless the user explicitly delegates that choice in the current request. A `NO_TRADE_NOW` or `NO_LIMIT_SETUP` result ends that attempt; it never silently substitutes the other mode.
+For an ambiguous request such as “Open ETH,” Hermes asks whether the intent is **market now** or **limit level**, unless the user explicitly delegates that choice in the current request. `functional_test` is available only when the user explicitly asks to test the lifecycle; it is market-only and does not turn an AI response into a trading recommendation. A `NO_TRADE_NOW` or `NO_LIMIT_SETUP` result ends that strategy attempt; it never silently substitutes the other mode.
 
 ## Live MVP sequence
 
-1. Ask TrueNorth once for a fresh analysis-only setup.
-2. Show the setup card and, if the user chooses `live_mvp`, fill the current ticket explicitly.
-3. Show the ticket snapshot: market, side, type, leverage, size unit/value, displayed order value, displayed margin, TP/SL, fee, slippage, and the current submit-button label.
+1. For a research or strategy intent, ask TrueNorth once for a fresh analysis-only setup. For an explicit `functional_test`, record the current user request instead.
+2. Show the strategy setup card or functional-test request card and, if the user chooses `live_mvp`, fill the current ticket explicitly.
+3. Show the ticket snapshot: market, side, type, leverage, size unit/value, displayed order value, displayed margin, TP/SL, fee, slippage, current submit-button label, and the exact-market Open Orders/Positions baseline.
 4. Require the user to confirm that exact snapshot.
-5. Click only that current rendered ticket-submit control once if its immediate re-read matches the confirmed snapshot exactly. If it opens a TrueNorth order-confirmation screen rather than executing, read that screen as a new snapshot. Any difference in its action, token size, estimated execution, value, margin, liquidation, slippage, protections, fees, or final button label cancels the earlier authorization. Show the confirmation snapshot and obtain a new exact approval before one final action click. The user handles any external wallet prompt.
-6. Read back Open Orders or Positions. A ticket click, confirmation screen, toast, wallet prompt, or review panel alone is not proof of execution.
+5. Click only that current rendered ticket-submit control once if its immediate re-read matches the confirmed snapshot exactly. If it opens a TrueNorth order-confirmation screen rather than executing, read that screen as a new snapshot. Any difference in its action, token size, estimated execution, value, margin, liquidation, slippage, protections, fees, or final button label cancels the earlier authorization. Show the confirmation snapshot and obtain a new exact approval, then immediately re-read every bound confirmation field before one final action click; any difference cancels that approval. The user handles any external wallet prompt.
+6. Read back Open Orders or Positions and compare them with the exact-market baseline. A ticket click, confirmation screen, toast, wallet prompt, or review panel alone is not proof of execution.
+
+### Functional-test variant
+
+An explicitly user-requested `functional_test` may go straight to a current **Market** ticket only in `live_mvp`, without relying on an analysis setup. It is a lifecycle test, not a trading recommendation: stale, missing, or weak AI data is never described as a valid signal. The ticket, and any rendered platform confirmation, remain fully snapshot-bound and separately approved. Without that screen, compare the mandatory post-click read-back to the exact-market baseline: no change is `NOT_EXECUTED`; any new or changed exact-market order or position is `FAILED`, reported, and never retried. TP/SL stays off unless the user separately asks for exact levels, so a verified position can expose its actual close controls for later mapping.
 
 ## Browser boundary
 
@@ -63,7 +68,7 @@ This is an MVP workflow rule, not a technical browser sandbox.
 
 ## Status
 
-`0.2.1` — adds an observed confirmation-layer rule. On one rendered screen, the first ticket submit control opened an on-origin **Confirm Market Order** screen rather than proving execution. It displayed exchange, action, token size, estimated execution, order value, margin, liquidation, slippage, protection fields, fees, and a separate final action button. The confirmation was cancelled after its live execution terms differed from the prior setup; no order or position was created. This is one rendered-screen observation, not a universal UI guarantee.
+`0.2.2` — adds an explicit user-directed `functional_test` path for a market-order lifecycle check. It is not a strategy mode, does not rely on stale analysis as a signal, and retains the ticket approval plus any rendered platform-confirmation approval. The observed confirmation-layer rule remains unchanged.
 
 ## License
 

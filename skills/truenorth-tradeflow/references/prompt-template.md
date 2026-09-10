@@ -5,8 +5,11 @@ Choose exactly one intent before sending a prompt. An intent describes the user'
 - `research_only` — analysis without a planned entry.
 - `market_now` — an entry justified now at market, otherwise no trade.
 - `limit_level` — a resting limit entry at a future level, otherwise no trade.
+- `functional_test` — an explicitly current-user-directed, `live_mvp` market-order lifecycle check, not a trade recommendation.
 
 Do not silently change an intent. A market request never becomes a limit request, and a limit request never becomes a market request unless the user explicitly delegates a fresh choice.
+
+`functional_test` is not a fallback after a strategy result. It requires both an explicit current user request and `live_mvp`, and may omit an AI prompt entirely. If the user asks an optional AI question for this purpose, require it to be labelled non-advisory and never treat stale or missing price data as a current setup.
 
 ## `research_only`
 
