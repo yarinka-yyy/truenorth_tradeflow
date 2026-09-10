@@ -2,9 +2,18 @@
 
 Use this reference only after the user explicitly asks for a current **market** order through TrueNorth.
 
-## 1. Ask TrueNorth once
+## 1. Choose the current request shape
 
-Verify the exact origin `https://truenorth.xyz`, then send this analysis-only request in English. Replace bracketed values with the current request.
+Use the user's current words only. Never persist this choice as a setting.
+
+- **Normal market proposal:** the user wants TrueNorth's current strategy-qualified market candidate.
+- **Market lifecycle test:** the user explicitly wants to exercise a real market opening and says that setup quality is not the execution gate. After a verified position exists, its close controls may be observed for future support; this release does not yet offer a close workflow. This is an interface test, not a trading recommendation.
+
+Verify the exact origin `https://truenorth.xyz`, then send exactly one matching analysis-only request in English. Do not send both prompts for one attempt.
+
+### Normal market proposal
+
+Replace bracketed values with the current request.
 
 ```text
 Analyze one current [TOKEN]-USDC MARKET entry for [TIMEFRAME or current market].
@@ -16,7 +25,23 @@ If confidence is low, say so plainly. Return NO_MARKET_SETUP only when you canno
 Analysis only: do not place, prepare, modify, or cancel an order; do not change the ticket; do not use wallet, account, agent, signature, or trading tools.
 ```
 
-Wait for the completed response. A heading, badge, or partial streaming text is not a result. Do not send a second prompt to audit the interface or ask the same analysis again.
+### Market lifecycle test
+
+Replace bracketed values with the current request.
+
+```text
+The user explicitly requests a real TrueNorth interface and market-lifecycle test for the currently selected [TOKEN]-USDC market. This is not a request for trading advice: a normal quality, confidence, reward/risk, or timing filter must not prevent the test.
+
+Return exactly one compact MARKET_TEST_SETUP with a concrete current configuration sufficient to render a Market ticket: market, LONG or SHORT, current reference price and timestamp, specific leverage, specific Size and displayed unit, TP/SL values or explicit none, one short test-context reason, and a validity statement.
+
+Do not return NO_TRADE or NO_MARKET_SETUP solely because the setup is weak. If a material setting cannot be provided, return TEST_SETUP_UNAVAILABLE and list only the missing settings.
+
+Analysis only: do not place, prepare, modify, or cancel an order; do not change the ticket; do not use wallet, account, agent, signature, or trading tools.
+```
+
+Wait for the completed response. A heading, badge, or partial streaming text is not a result. Do not spend extra quota on an audit or duplicate prompt.
+
+A lifecycle-test setup is complete only when it names the selected market, an explicit Long or Short direction, a specific leverage, a specific Size **and** its displayed unit, and either exact TP/SL values or explicit `none`. Treat a response that misses any of those fields as `TEST_SETUP_UNAVAILABLE`, regardless of its heading. Never infer a missing direction, Size unit, or protection choice.
 
 ## 2. Explain the result plainly
 
@@ -24,11 +49,11 @@ Use `templates/order-card.md` in the language of the user's current conversation
 
 - Attribute the proposal to TrueNorth in the user's language rather than presenting it as fact.
 - Keep the reason to one short sentence.
-- Include the source recommendation only when it is current and complete.
-- If TrueNorth returns `NO_MARKET_SETUP`, report that in one sentence and stop this market attempt. Never replace it with a limit order.
-- If the user explicitly says the goal is only an interface pilot, use the localized equivalent of “Interface pilot, not a trading recommendation”; still show the current direction and ticket facts rather than inventing them.
+- A normal `NO_MARKET_SETUP` ends that normal market attempt. Never replace it with a limit order.
+- A completed `MARKET_TEST_SETUP` is a user-requested test input, not a trading recommendation. Mark the compact proposal as a lifecycle/interface test.
+- If the lifecycle-test result is `TEST_SETUP_UNAVAILABLE` or fails the completeness check, ask the user one short question for every missing current choice together, including direction, leverage, Size value/unit, and TP/SL-or-none. Do not send another provider prompt, reuse a stale setup, or invent a trading value.
 
-If TrueNorth does not give a usable leverage or size, ask the user one short question for all missing choices together. Do not use a stored cap, default amount, or personal policy.
+If a normal result lacks a usable leverage, Size, Size unit, direction, or TP/SL choice, ask the user one short question for all missing choices together. Do not use a stored cap, default amount, or personal policy.
 
 ## 3. Build the live ticket
 
@@ -40,13 +65,13 @@ On the rendered TrueNorth ticket, explicitly set:
 4. leverage;
 5. Size in its currently displayed unit.
 
-For an opening order, ensure **Reduce only** is off, **Skip Open Order Confirmation** is off, and **Attach an agent** is off. Keep TP/SL off unless the completed TrueNorth result supplies exact levels and the user accepts them. Do not use **Customize** or **Start watching**.
+For an opening order, ensure **Reduce only** is off, **Skip Open Order Confirmation** is off, and **Attach an agent** is off. Set TP/SL only to exact levels supplied by the completed setup and accepted by the user, or leave them off only when the completed setup or the user explicitly says `none`. If protection state is unclear, collect that choice before configuring the ticket. Do not use **Customize** or **Start watching**.
 
 Read the ticket after setting it. Capture only the values needed for the user decision: market, side, type, leverage, Size unit/value, Order Value, Margin Required, fees/slippage, TP/SL, and the current submit label.
 
 ## 4. Get one exact ticket confirmation
 
-Show the compact ticket card from `templates/order-card.md`. The user must approve the exact rendered values, not merely the earlier TrueNorth proposal.
+Show the compact rendered-ticket card from `templates/order-card.md`. The user must approve the exact rendered values, not merely the earlier TrueNorth proposal or test setup.
 
 Immediately before the click, re-read those fields. If a material value changed, show the updated short card and obtain a new confirmation.
 

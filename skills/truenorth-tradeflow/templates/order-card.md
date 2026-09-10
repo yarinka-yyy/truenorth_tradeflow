@@ -1,8 +1,8 @@
 # TrueNorth order card
 
-Use this as the normal user-facing response. Write it in the language of the user's current conversation. Use English only for the TrueNorth analysis request. Keep empty fields out of the message.
+Use this as the normal user-facing response. Write it in the language of the user's current conversation. Use English only for the TrueNorth request. Keep empty fields out of the message.
 
-## TrueNorth proposal
+## Normal TrueNorth proposal
 
 ```markdown
 **TrueNorth proposes opening now**
@@ -19,7 +19,23 @@ Use this as the normal user-facing response. Write it in the language of the use
 The rendered TrueNorth ticket will be shown before opening.
 ```
 
-For an interface-only pilot, state the localized equivalent of: **This is an interface pilot, not a trading recommendation.**
+## TrueNorth lifecycle-test setup
+
+Use only when the user explicitly requested the real lifecycle/interface test.
+
+```markdown
+**TrueNorth lifecycle-test setup**
+
+- Market: `[market]`
+- Direction: `[Long / Short]`
+- Entry: `Market`
+- Leverage: `[test setup value]`
+- Size: `[test setup value and unit]`
+- Protection: `[SL …, TP … / none]`
+- Why: `[one short test-context reason]`
+
+This is a real interface/lifecycle test, not a trading recommendation. The rendered TrueNorth ticket will be shown before opening.
+```
 
 ## Rendered ticket confirmation
 
