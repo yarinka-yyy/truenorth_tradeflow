@@ -1,6 +1,6 @@
 # TrueNorth TradeFlow
 
-One browser-only skill for proposing and opening one current **market** order through the TrueNorth UI after the user approves the exact rendered ticket. It supports an explicitly requested real lifecycle test, where strategy quality does not block testing the market-opening path.
+One Hermes browser-only skill for proposing and opening one current **market** order through the TrueNorth UI after the user approves the exact rendered ticket. It supports an explicitly requested real lifecycle test, where strategy quality does not block testing the market-opening path.
 
 ## Install in Hermes
 
@@ -9,10 +9,6 @@ hermes skills install yarinka-yyy/truenorth_tradeflow/skills/truenorth-tradeflow
 ```
 
 Start a new Hermes session after installation.
-
-## Codex package
-
-This repository is also a portable Agent Plugin source: its root `plugin.json` packages the same canonical `skills/` directory for compatible Codex hosts. It is not an OpenAI directory listing or a local Codex marketplace, and this repository does not include a second skill copy.
 
 ## What it does
 
@@ -39,14 +35,13 @@ A normal `NO_MARKET_SETUP` ends that normal attempt. A user-requested lifecycle 
 
 ## Files
 
-- `plugin.json` — portable Agent Plugin manifest for the existing skill folder.
 - `skills/truenorth-tradeflow/SKILL.md` — compact router and universal safety constraints.
 - `skills/truenorth-tradeflow/references/` — independent normal-proposal, lifecycle-test, and shared-ticket procedures.
 - `skills/truenorth-tradeflow/templates/order-card.md` — localized proposal, confirmation, and result format.
 
 ## Status
 
-`0.4.0` — portable Hermes/Codex packaging and progressively disclosed market workflow. It intentionally favors one verified opening path over unobserved position-management or limit features.
+`0.4.1` — Hermes-only packaging and progressively disclosed market workflow. It intentionally favors one verified opening path over unobserved position-management or limit features.
 
 ## License
 

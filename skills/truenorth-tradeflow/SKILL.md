@@ -1,7 +1,7 @@
 ---
 name: truenorth-tradeflow
 description: Propose and open one user-confirmed TrueNorth market order through the browser UI; use for current market entries or explicit lifecycle tests, not limit orders, closing, or direct Hyperliquid actions.
-version: 0.4.0
+version: 0.4.1
 author: yarinka-yyy, Hermes Agent
 license: MIT
 platforms: [windows, macos, linux]
