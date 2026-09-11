@@ -19,6 +19,24 @@ Use this as the normal user-facing response. Write it in the language of the use
 The rendered TrueNorth ticket will be shown before opening.
 ```
 
+## Normal TrueNorth limit proposal
+
+```markdown
+**TrueNorth proposes a limit entry**
+
+- Market: `[market]`
+- Direction: `[Long / Short]`
+- Entry: `Limit [exact price]`
+- Leverage: `[TrueNorth recommendation / user choice]`
+- User capital target: `[target Margin Required / explicitly requested Size or Order Value]`
+- Time in force: `GTC`
+- Protection: `[SL …, TP … / none]`
+- Why: `[one short TrueNorth reason]`
+- Confidence: `[if shown]`
+
+The rendered TrueNorth limit ticket will be shown before opening. A limit order is reported as resting until Positions proves a fill.
+```
+
 ## TrueNorth lifecycle-test setup
 
 Use only when the user explicitly requested the real lifecycle/interface test.
@@ -44,9 +62,10 @@ This is a real interface/lifecycle test, not a trading recommendation. The rende
 
 - Market: `[rendered market]`
 - Direction: `[rendered Long / Short]`
-- Entry: `Market`
+- Entry: `[Market / Limit [exact price]]`
 - Leverage: `[rendered leverage]`
 - User capital target: `[requested Margin Required / explicitly requested Size or Order Value]`
+- Time in force: `[GTC for a Limit entry / n/a for Market]`
 - Size: `[current rendered Size unit and value]`
 - Order Value: `[current rendered value]`
 - Margin Required: `[current rendered value]`
@@ -75,7 +94,7 @@ Approve this current opening? This one approval also covers a same-intent render
 Approve this full close? This one approval also covers a same-intent rendered final confirmation.
 ```
 
-Re-read and report the current opening ticket, current close position row, and any final confirmation for visibility. Normal price movement, PNL, base-size rounding, calculated Order Value or Margin Required, fees, slippage, liquidation, estimated execution, or final submit wording do not create another confirmation. Ask again only when the requested market, side, Market type, leverage or amount target, protection, opening/close controls, or full-close intent cannot be honored, or when a failed attempt needs a new user choice.
+Re-read and report the current opening ticket, current close position row, and any final confirmation for visibility. Normal price movement, PNL, base-size rounding, calculated Order Value or Margin Required, fees, slippage, liquidation, estimated execution, or final submit wording do not create another confirmation. Ask again only when the requested market, side, Market/Limit type or limit price, leverage or amount target, TIF, protection, opening/close controls, or full-close intent cannot be honored, or when a failed attempt needs a new user choice.
 
 ## Result
 
@@ -84,6 +103,7 @@ Re-read and report the current opening ticket, current close position row, and a
 
 - Market: `[observed market if rendered]`
 - Direction: `[observed side if rendered]`
+- Entry type: `[Market / resting Limit / filled position]`
 - Size: `[observed size if rendered]`
 - Status: `[observed status; use Closed only when Positions is 0 and no row remains]`
 - Open Orders: `[observed count if relevant]`
