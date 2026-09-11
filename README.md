@@ -1,14 +1,18 @@
 # TrueNorth TradeFlow
 
-A small Hermes skill for opening one current **market** order through the TrueNorth browser UI after the user sees and confirms the exact ticket. It also supports an explicitly requested real interface/lifecycle test: the goal is to exercise the market path, not to wait for an ideal strategy signal.
+One browser-only skill for proposing and opening one current **market** order through the TrueNorth UI after the user approves the exact rendered ticket. It supports an explicitly requested real lifecycle test, where strategy quality does not block testing the market-opening path.
 
-## Install
+## Install in Hermes
 
 ```bash
 hermes skills install yarinka-yyy/truenorth_tradeflow/skills/truenorth-tradeflow
 ```
 
 Start a new Hermes session after installation.
+
+## Codex package
+
+This repository is also a portable Agent Plugin source: its root `plugin.json` packages the same canonical `skills/` directory for compatible Codex hosts. It is not an OpenAI directory listing or a local Codex marketplace, and this repository does not include a second skill copy.
 
 ## What it does
 
@@ -20,64 +24,29 @@ For an explicit lifecycle test, the user can say:
 
 > Run a real ETH market lifecycle test. The setup does not need to be a good trade.
 
-The skill then:
+For either request, the skill sends one matching current English analysis request to TrueNorth, returns a short source-attributed proposal in the user's language, renders the current ticket, and waits for the user's exact approval before every financial click. It then reads **Open Orders** and **Current Position** before reporting the result.
 
-1. identifies the current request as either a normal market proposal or an explicit lifecycle test; this is a per-request instruction, never stored configuration;
-2. asks TrueNorth once for the matching current English setup request;
-3. returns a short source-attributed proposal in the user's current language; this is not an order approval;
-4. asks only for any missing current choice, such as Size or leverage;
-5. fills and re-reads the rendered TrueNorth order ticket;
-6. shows that exact rendered ticket and waits for the user's approval;
-7. submits once through its current rendered control;
-8. if TrueNorth shows a separate confirmation screen, asks for a separate confirmation of that screen;
-9. reads **Open Orders** and **Current Position** before reporting the result.
+The user chooses current size, leverage, and protection values. Those choices override a provider recommendation, are never stored, and are never converted with an assumed formula. In particular, when the user specifies a target rendered `Margin Required`, the skill adjusts only the visible Size control and pauses if the exact target cannot be rendered.
 
-For a normal proposal, a completed `NO_MARKET_SETUP` ends that normal attempt. For an explicitly requested lifecycle test, Hermes sends the distinct `MARKET_TEST_SETUP` request instead of treating strategy quality as an execution gate. A lifecycle test is not trading advice and still requires the exact rendered-ticket confirmation.
-
-The user chooses any missing size, leverage, and protection values in the current conversation. The skill has no built-in amount cap, token allowlist, or persistent trading mode.
-
-## Example of a localized rendered-ticket confirmation
-
-The labels below are English only as documentation. Hermes writes the actual card in the language of the user's current conversation, and only after those values have been read from the current ticket.
-
-```markdown
-**Confirm the TrueNorth ticket**
-
-- Market: `[rendered market]`
-- Direction: `[rendered direction]`
-- Entry: `Market`
-- Leverage: `[rendered leverage]`
-- Size: `[rendered Size unit and value]`
-- Ticket: `Order Value [rendered value]`, `Margin Required [rendered value]`
-- Fees: `[rendered values]`
-- Maximum slippage: `[rendered maximum]`
-- Live estimates: `[liquidation and Est slippage, if shown]`
-- Protection: `[rendered SL/TP or none]`
-- Opening controls: `Reduce only [on/off]`, `Skip Open Order Confirmation [on/off]`, `Attach an agent [on/off]`
-- Submit control: `[rendered label]`
-- Why: `[one short TrueNorth reason]`
-
-Confirm this exact market order?
-```
-
-The values are always read from the current rendered ticket. Hermes does not assume a formula or reuse an old setup. When the current screen separately labels liquidation or `Est` slippage as a live estimate, that estimate is re-read and reported but a price-tick-only refresh does not itself replace any other user-approved bound ticket field, including selections, displayed Order Value/Margin/fees, or stated maximum slippage.
+A normal `NO_MARKET_SETUP` ends that normal attempt. A user-requested lifecycle test instead uses `MARKET_TEST_SETUP`, so ordinary timing, confidence, or quality filters do not end the test. It is not trading advice and still requires the exact rendered-ticket confirmation.
 
 ## Current scope
 
 - **Supported now:** one user-confirmed market opening through `https://truenorth.xyz`, including a user-requested lifecycle-test opening.
-- **Not supported yet:** closing a position, resizing, reversing, cancelling, or opening a limit order. Those paths will be added only from controls actually observed during the first market lifecycle.
+- **Not supported yet:** closing a position, resizing, reversing, cancelling, or opening a limit order. Close support will be added only from controls actually observed on a real current position.
 - **Never automated:** wallet connection, signatures, passwords, permissions, and 2FA. The user handles those prompts directly.
 - **Never used:** direct Hyperliquid routes, APIs, backend automation, watcher controls, or attached agents.
 
 ## Files
 
-- `skills/truenorth-tradeflow/SKILL.md` — entry point and common rules.
-- `skills/truenorth-tradeflow/references/market-entry.md` — normal and lifecycle-test market workflow.
-- `skills/truenorth-tradeflow/templates/order-card.md` — concise localized proposal, confirmation, and result format.
+- `plugin.json` — portable Agent Plugin manifest for the existing skill folder.
+- `skills/truenorth-tradeflow/SKILL.md` — compact router and universal safety constraints.
+- `skills/truenorth-tradeflow/references/` — independent normal-proposal, lifecycle-test, and shared-ticket procedures.
+- `skills/truenorth-tradeflow/templates/order-card.md` — localized proposal, confirmation, and result format.
 
 ## Status
 
-`0.3.2` — market-first MVP with an explicit lifecycle-test setup path and live-estimate handling that avoids repeated approval loops. It intentionally favors one clear opening path over a large policy engine or unverified position-management features.
+`0.4.0` — portable Hermes/Codex packaging and progressively disclosed market workflow. It intentionally favors one verified opening path over unobserved position-management or limit features.
 
 ## License
 

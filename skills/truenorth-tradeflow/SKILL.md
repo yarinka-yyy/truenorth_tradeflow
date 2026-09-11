@@ -1,7 +1,7 @@
 ---
 name: truenorth-tradeflow
-description: Open TrueNorth market orders after user approval.
-version: 0.3.2
+description: Propose and open one user-confirmed TrueNorth market order through the browser UI; use for current market entries or explicit lifecycle tests, not limit orders, closing, or direct Hyperliquid actions.
+version: 0.4.0
 author: yarinka-yyy, Hermes Agent
 license: MIT
 platforms: [windows, macos, linux]
@@ -15,7 +15,7 @@ metadata:
 
 # TrueNorth TradeFlow
 
-Use this skill when the user wants a current market order through the authenticated TrueNorth UI. It turns one current TrueNorth request into a compact proposal, then opens only the exact ticket the user confirms. A user can explicitly request a real market lifecycle test, where proving the UI path matters more than ordinary setup quality.
+Use this skill when the user wants a current market order through the authenticated TrueNorth UI. It turns one current TrueNorth request into a compact proposal, then opens only the exact rendered ticket the user confirms. A user can explicitly request a real market lifecycle test, where proving the UI path matters more than ordinary setup quality.
 
 ## When to use
 
@@ -29,29 +29,18 @@ Do not use this skill for direct Hyperliquid navigation, exchange APIs, wallet s
 ## Common rules
 
 1. Begin at `https://truenorth.xyz` and stop on every off-origin redirect, popup, or link.
-2. Send one consolidated TrueNorth request for the current market attempt. For a normal request, ask for a market proposal. For an explicit user-requested lifecycle test, ask for a concrete `MARKET_TEST_SETUP` even if ordinary strategy quality is weak. This applies only to the current request; it is not saved configuration.
-3. Keep market and limit distinct. If the user asks for a limit order, say that this market-first release does not yet support it; never silently substitute a market order.
-4. Show the user a compact card in their language. Preserve the full completed TrueNorth result only as execution data; do not dump its chat text into the reply.
-5. The user approves the exact displayed ticket, not a previous suggestion. A changed bound ticket field, including a user-controlled selection, displayed Order Value/Margin/fee, or stated maximum, requires a new confirmation; only a current screen's UI-labelled live liquidation or `Est` slippage estimate is re-read and reported without becoming a changed bound field.
-6. If TrueNorth renders a separate order-confirmation screen, treat it as a new action: show its material values, get a separate confirmation, then re-read it before one final click.
-7. The user handles every wallet, signature, password, permission, or 2FA prompt. Never type or approve one.
-8. After any submit click, read the rendered **Open Orders** and **Current Position** before claiming an order or position exists.
+2. Send one consolidated current TrueNorth request. A normal request uses the normal-proposal route; an explicit lifecycle test uses `MARKET_TEST_SETUP`, even when ordinary quality is weak. This choice and every user parameter apply only to the current request.
+3. Keep market and limit distinct. If the user asks for a limit order, say that this market-first release does not support it; never silently substitute a market order.
+4. Current user choices override a provider recommendation. Do not store a cap, leverage, size, protection, test mode, or other personal policy. Do not derive a notional or nearby amount from a user-requested rendered field.
+5. Show a compact card in the user's language, never the full TrueNorth chat response. The user approves the current rendered ticket, not a previous suggestion.
+6. A changed bound field requires a replacement approval. UI-labelled live liquidation or `Est` slippage remains a re-read visibility estimate, not a bound field.
+7. Treat a separately rendered final confirmation as a new action requiring a new user approval. The user alone handles wallet, signature, password, permission, and 2FA prompts.
+8. After every submit click, read rendered **Open Orders** and **Current Position** before claiming an order or position exists.
 
-## Market route
+## Routes
 
-Read `references/market-entry.md` and use `templates/order-card.md`.
+- **Normal market proposal:** read `references/market-proposal.md`, then `references/market-ticket.md`.
+- **Explicit lifecycle test:** read `references/market-lifecycle-test.md`, then `references/market-ticket.md`.
+- Use `templates/order-card.md` for every user-facing proposal, confirmation, and result.
 
-## Current UI observation
-
-One rendered TrueNorth ticket showed separate Size, Order Value, Margin Required, TP/SL, and agent controls. Its initial submit control opened a separate on-origin confirmation screen in that observation. Read the current screen every time; this is not a universal UI contract.
-
-## Verification
-
-A market attempt is complete only when all are true:
-
-- every observed page kept the exact TrueNorth origin;
-- one completed current TrueNorth proposal or lifecycle-test setup supplied the ticket inputs;
-- the user saw and confirmed the current rendered ticket;
-- any rendered final confirmation was separately confirmed;
-- no protected prompt was handled by Hermes; and
-- Open Orders or Current Position was read back and reported plainly.
+Read only the route selected by the current request. Both routes use the shared ticket procedure.

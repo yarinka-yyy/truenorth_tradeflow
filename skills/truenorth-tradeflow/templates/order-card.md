@@ -28,9 +28,9 @@ Use only when the user explicitly requested the real lifecycle/interface test.
 
 - Market: `[market]`
 - Direction: `[Long / Short]`
+- Current reference: `[provider price and timestamp]`
 - Entry: `Market`
-- Leverage: `[test setup value]`
-- Size: `[test setup value and unit]`
+- Current user execution constraints: `[for example: leverage ×3; target Margin Required 10 USDC]`
 - Protection: `[SL …, TP … / none]`
 - Why: `[one short test-context reason]`
 
