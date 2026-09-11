@@ -20,10 +20,10 @@ Wait for the completed response. A heading, badge, or partial streaming text is 
 
 ## Determine whether it is usable
 
-A completed test setup must name the selected market, explicit Long or Short direction, and TP/SL values or explicit `none`. Current user constraints for leverage, Size, order value, or rendered Margin Required are not provider-owned fields and must not be replaced by the response.
+A completed test setup must name the selected market, explicit Long or Short direction, and TP/SL values or explicit `none`. Current user constraints for leverage, target rendered Margin Required, explicitly requested Size or Order Value, and protection must not be replaced by the response.
 
 - A completed `MARKET_TEST_SETUP` meeting those fields is usable even when its reason says the timing or quality is poor.
 - If the response is `TEST_SETUP_UNAVAILABLE`, `NO_TRADE`, `NO_MARKET_SETUP`, or lacks direction or protection, ask the user once for all missing current choices. Do not send a second provider prompt, reuse stale data, or invent a direction or protection state.
-- If the user has not chosen leverage, Size value/unit, order value, or a rendered Margin Required target needed for the ticket, collect that current choice now. Do not use a stored cap, a default amount, or a formula.
+- If the user has not chosen leverage and target rendered Margin Required, or has not explicitly chosen ticket Size/Order Value instead, collect that current choice now. Do not use a stored cap, a default amount, or a formula.
 
 Use the lifecycle-test proposal card in `templates/order-card.md`, mark it as a real interface/lifecycle test rather than a recommendation, then continue with `references/market-ticket.md`.

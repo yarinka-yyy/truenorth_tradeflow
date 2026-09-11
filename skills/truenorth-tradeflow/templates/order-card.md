@@ -11,7 +11,7 @@ Use this as the normal user-facing response. Write it in the language of the use
 - Direction: `[Long / Short]`
 - Entry: `Market`
 - Leverage: `[TrueNorth recommendation / user choice]`
-- Size: `[TrueNorth recommendation / user choice]`
+- User capital target: `[target Margin Required / explicitly requested Size or Order Value]`
 - Protection: `[SL …, TP … / none]`
 - Why: `[one short TrueNorth reason]`
 - Confidence: `[if shown]`
@@ -37,42 +37,30 @@ Use only when the user explicitly requested the real lifecycle/interface test.
 This is a real interface/lifecycle test, not a trading recommendation. The rendered TrueNorth ticket will be shown before opening.
 ```
 
-## Rendered ticket confirmation
+## One opening approval
 
 ```markdown
-**Confirm the TrueNorth ticket**
+**Approve the current TrueNorth opening**
 
 - Market: `[rendered market]`
 - Direction: `[rendered Long / Short]`
 - Entry: `Market`
 - Leverage: `[rendered leverage]`
-- Size: `[rendered Size unit and value]`
-- Order Value: `[rendered value]`
-- Margin Required: `[rendered value]`
-- Fees: `[rendered values]`
-- Maximum slippage: `[rendered maximum]`
+- User capital target: `[requested Margin Required / explicitly requested Size or Order Value]`
+- Size: `[current rendered Size unit and value]`
+- Order Value: `[current rendered value]`
+- Margin Required: `[current rendered value]`
+- Fees: `[current rendered values]`
+- Slippage: `[current rendered values]`
 - Live estimates: `[liquidation and Est slippage, if the screen shows them]`
 - Protection: `[rendered TP/SL or none]`
 - Opening controls: `Reduce only [on/off]`, `Skip Open Order Confirmation [on/off]`, `Attach an agent [on/off]`
 - Submit control: `[rendered label]`
 
-Confirm this exact market order?
+Approve this current opening? This one approval also covers a same-intent rendered final confirmation.
 ```
 
-If the screen labels liquidation or slippage as a live estimate, include its latest value for visibility. A price-tick-only change to that estimate is re-read and reported; any changed bound field — selected field, Order Value, Margin Required, fee, opening control, submit label, or stated maximum — requires a replacement approval.
-
-## Rendered final confirmation
-
-```markdown
-**TrueNorth requests final order confirmation**
-
-Changed or newly shown:
-- `[field]: [rendered value]`
-
-Confirm this exact final order?
-```
-
-Do not show this section unless TrueNorth actually renders a separate confirmation.
+Re-read and report the current ticket and final confirmation for visibility. Normal price movement, base-size rounding, calculated Order Value or Margin Required, fees, slippage, liquidation, estimated execution, or final submit wording do not create another confirmation. Ask again only when the requested market, side, Market type, leverage or amount target, protection, or opening controls cannot be honored, or when a failed attempt needs a new user choice.
 
 ## Result
 

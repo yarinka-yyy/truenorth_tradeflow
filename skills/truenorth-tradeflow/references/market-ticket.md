@@ -2,25 +2,25 @@
 
 Read this reference after either completed setup route. It governs one current market-opening attempt only.
 
+## Interpret the current user amount
+
+When the current user supplies an amount with leverage — for example, `10 USDC at 3x` — treat `10 USDC` as their target rendered **Margin Required** (their capital), not as the ticket's visible Size or Order Value. Set the requested leverage, then adjust only the visible **Size** control until the rendered Margin Required equals the target. Do not calculate a notional or infer a nearby Size from leverage. The user can explicitly state that an amount means ticket Size or Order Value instead.
+
+If the exact requested target cannot be rendered, or fees and available balance make the ticket unavailable, show the current rendered values and ask the user for one new current choice. Do not submit or choose a fallback amount.
+
 ## Build the live ticket
 
-On the rendered TrueNorth ticket, explicitly set the selected market, Long or Short direction, **Market** order type, current leverage, and Size in its currently displayed unit.
-
-Current user choices override provider recommendations. When the user specifies a target rendered field such as `Margin Required`, adjust only the rendered **Size** control and re-read the ticket after each adjustment. Never calculate a notional from leverage, assume a conversion, or silently choose the nearest available amount.
-
-If the exact target cannot be rendered, or fees and the available balance make the ticket unavailable, show the current rendered values and ask the user for one new current choice. Do not submit or choose a fallback amount.
+On the rendered TrueNorth ticket, explicitly set the selected market, Long or Short direction, **Market** order type, current leverage, and the user-requested margin target or explicitly requested Size/Order Value.
 
 For an opening order, ensure **Reduce only** is off, **Skip Open Order Confirmation** is off, and **Attach an agent** is off. Set TP/SL only to exact levels supplied by the completed setup or current user choice, or leave them off only when that source explicitly says `none`. Do not use **Customize** or **Start watching**.
 
-Read the current ticket after setting it. Capture only the values needed for the decision: market, side, type, leverage, Size unit/value, Order Value, Margin Required, fees, maximum slippage, TP/SL, the three opening-control states, and the current submit label. Capture UI-labelled liquidation price or `Est` slippage separately as live estimates when shown.
+Read the current ticket after setting it. Capture market, side, type, leverage, Size unit/value, Order Value, Margin Required, fees, maximum slippage, TP/SL, the three opening-control states, submit label, and any UI-labelled liquidation price or `Est` slippage.
 
-## Get the exact ticket confirmation
+## Get one opening approval
 
-Show the rendered-ticket card from `templates/order-card.md`. The user must approve the exact rendered values, not merely the earlier TrueNorth proposal or lifecycle setup.
+Show the rendered-ticket card from `templates/order-card.md`. The user approves the current opening intent once: market, side, Market type, requested leverage and margin target (or explicitly requested Size/Order Value), TP/SL, and opening-control states. That approval also covers a same-intent rendered final confirmation.
 
-Immediately before the click, re-read every bound field: market, side, type, leverage, Size unit/value, Order Value, Margin Required, fees, maximum slippage, TP/SL, **Reduce only**, **Skip Open Order Confirmation**, **Attach an agent**, and submit label. If any bound field changed, show the updated short card and obtain a new approval.
-
-On a current screen that labels liquidation price or slippage as a live `Est` value, re-read and retain its latest display. A price-tick-only change to those estimates does not invalidate an otherwise unchanged approval. A change to a stated maximum slippage or any other bound field does.
+Immediately before the outer click, re-read the core intent. If market, side, type, requested leverage or target, protection, or opening-control state cannot match the approval, pause and ask the user for a new current choice. Do not request another approval merely because price, base-size rounding, calculated Order Value or Margin Required, fees, slippage, liquidation, estimated execution, or submit wording changed while the core intent remains the same.
 
 Click the current rendered ticket-submit control once.
 
@@ -28,12 +28,12 @@ Click the current rendered ticket-submit control once.
 
 If the ticket click opens a rendered TrueNorth confirmation rather than an accepted result:
 
-1. Read its action, token size, estimated execution, Order Value, Margin Required, fees, maximum slippage, protections, and final button label; retain liquidation and `Est` slippage separately if shown.
-2. Compare its material values with the approved ticket, show only changed or newly shown values, and get a separate exact user confirmation.
-3. Immediately re-read every bound field. If one changed, cancel that approval and show a replacement card. A price-tick-only live estimate change does not invalidate an otherwise unchanged final approval.
-4. After approval, click the rendered final control once.
+1. Re-read its action, token size, estimated execution, Order Value, Margin Required, fees, slippage, protections, and final button label.
+2. Continue under the existing one approval only when it still represents the same market, side, opening intent, protection, and opening-control state. Price, converted base size, calculated values, fees, and slippage can refresh without another approval.
+3. If the final layer conflicts with that core intent, is off-origin, is unclear, or the previous attempt failed and needs a new amount or other user choice, stop and ask the user. Do not retry an uncertain click.
+4. Otherwise click the rendered final control once without a second confirmation prompt.
 
-If a wallet, signature, password, permission, or 2FA prompt appears at any time, stop for the user to complete it. Do not retry a click whose result is uncertain.
+If a wallet, signature, password, permission, or 2FA prompt appears at any time, stop for the user to complete it.
 
 ## Read back and report
 

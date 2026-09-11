@@ -25,7 +25,7 @@ Use `templates/order-card.md` in the language of the current conversation.
 - Attribute the proposal to TrueNorth rather than presenting it as fact.
 - Keep the reason to one short sentence.
 - A completed `NO_MARKET_SETUP` ends this normal attempt. Never replace it with a limit order.
-- Merge current user choices with the completed result. Ask the user one short question for all choices absent from both, such as direction, leverage, Size value/unit, or TP/SL-or-none.
+- Merge current user choices with the completed result. Ask the user one short question for all choices absent from both, such as direction, leverage plus target rendered Margin Required, explicitly requested ticket Size/Order Value, or TP/SL-or-none.
 - A current user choice overrides a provider recommendation. Do not infer an amount, unit, or protection state.
 
 Continue with `references/market-ticket.md` only after the required current choices are explicit.
