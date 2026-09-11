@@ -1,7 +1,7 @@
 ---
 name: truenorth-tradeflow
 description: TrueNorth browser entries and verified full closes.
-version: 0.6.0
+version: 0.7.0
 author: yarinka-yyy, Hermes Agent
 license: MIT
 platforms: [windows, macos, linux]
@@ -15,7 +15,7 @@ metadata:
 
 # TrueNorth TradeFlow
 
-Use this skill when the user wants a current Market or Limit opening through the authenticated TrueNorth UI, or a full Market close of a verified current position. For an opening, it turns one current TrueNorth request into a compact proposal, then opens the current rendered ticket after one user approval. A Limit opening keeps its exact resting price and may attach exact TP/SL controls. For a close, it uses only the verified position row's observed **Close → Market** control after one close approval. A user can explicitly request a real market lifecycle test, where proving the UI path matters more than ordinary setup quality.
+Use this skill when the user wants a current Market or Limit opening through the authenticated TrueNorth UI, a full Market close of a verified current position, or cancellation of the full currently rendered exact-market resting-order set. For an opening, it turns one current TrueNorth request into a compact proposal, then opens the current rendered ticket after one user approval. A Limit opening keeps its exact resting price and may attach exact TP/SL controls. For a close, it uses only the verified position row's observed **Close → Market** control after one close approval. For cancellation, it uses only the observed Open Orders **Cancel All** control after one explicit cancellation approval. A user can explicitly request a real market lifecycle test, where proving the UI path matters more than ordinary setup quality.
 
 ## When to use
 
@@ -24,19 +24,20 @@ Use this skill when the user wants a current Market or Limit opening through the
 - “Ask TrueNorth whether SOL has a current market setup.”
 - “Run a real ETH market lifecycle test; it does not need to be a good trade.”
 - “Close my current ETH position at market.”
+- “Cancel all current ETH open orders.”
 
-Do not use this skill for direct Hyperliquid navigation, exchange APIs, wallet signing, background trading, limit closes, resizing, reversing, cancelling, margin adjustment, TP/SL editing, or watcher controls.
+Do not use this skill for direct Hyperliquid navigation, exchange APIs, wallet signing, background trading, limit closes, resizing, reversing, partial order cancellation, order editing, margin adjustment, TP/SL editing, or watcher controls.
 
 ## Common rules
 
 1. Begin at `https://truenorth.xyz` and stop on every off-origin redirect, popup, or link.
 2. Send one consolidated current TrueNorth request for an opening. A normal Market request uses the market-proposal route; a normal Limit request uses the limit-proposal route; an explicit market lifecycle test uses `MARKET_TEST_SETUP`, even when ordinary quality is weak. This choice and every user parameter apply only to the current request.
-3. Keep Market and Limit distinct. This release supports Market and Limit openings, plus only the observed verified-position row's rendered **Close → Market** route. Never silently substitute an entry type, and never treat a resting Limit order as a position.
+3. Keep Market and Limit distinct. This release supports Market and Limit openings, the observed exact-market Open Orders **Cancel All** route, and only the observed verified-position row's rendered **Close → Market** route. Never silently substitute an entry type, and never treat a resting Limit order as a position.
 4. Current user choices override a provider recommendation. An amount supplied with leverage means the user's target rendered **Margin Required**, unless the user explicitly calls it ticket Size or Order Value. Adjust only the visible Size control until the target is rendered; do not assume a leverage formula or choose a nearby amount. Do not store a cap, leverage, size, protection, test mode, or other personal policy.
-5. Show a compact card in the user's language, never the full TrueNorth chat response. One current approval authorizes one current opening intent or one full-close intent, including a same-intent on-origin final confirmation.
+5. Show a compact card in the user's language, never the full TrueNorth chat response. One current approval authorizes one current opening intent, one full-close intent, or one explicit exact-market batch cancellation, including a same-intent on-origin final confirmation when rendered.
 6. Re-read every current ticket and final-confirmation field for visibility. Normal price movement, base-size rounding, calculated Order Value or Margin Required, fees, slippage, liquidation, and estimated execution do not create another approval. Ask again only if the current user intent cannot be honored, such as a changed market, side, order type or limit price, requested leverage or amount target, TIF, protection, opening/close control, a failed submission that needs a new user choice, or an uncertain/off-origin state.
 7. A separately rendered on-origin final confirmation with the same intent is covered by the one approval and is clicked once after re-read. The user alone handles wallet, signature, password, permission, and 2FA prompts.
-8. After every submit click, read rendered **Positions** (count and row) and **Open Orders** before claiming an order, position, or close exists. A resting Limit order is reported as **Open order** until a position row is rendered. A `Current Position` string inside a working ticket is contextual only; it cannot prove or overturn rendered position state by itself.
+8. After every submit or cancellation click, read rendered **Positions** (count and row) and **Open Orders** before claiming an order, position, or close exists. A resting Limit order is reported as **Open order** until a position row is rendered. A `Current Position` string inside a working ticket is contextual only; it cannot prove or overturn rendered position state by itself.
 
 ## Routes
 
@@ -44,6 +45,7 @@ Do not use this skill for direct Hyperliquid navigation, exchange APIs, wallet s
 - **Normal limit-entry proposal:** read `references/limit-proposal.md`, then `references/limit-ticket.md`.
 - **Explicit lifecycle test:** read `references/market-lifecycle-test.md`, then `references/market-ticket.md`.
 - **Verified current-position full close:** read `references/market-close.md`.
+- **Verified exact-market open-order cancellation:** read `references/order-cancel.md`.
 - Use `templates/order-card.md` for every user-facing proposal, approval, and result.
 
 Read only the route selected by the current request.

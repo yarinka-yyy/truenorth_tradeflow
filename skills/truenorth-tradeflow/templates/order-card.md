@@ -94,12 +94,27 @@ Approve this current opening? This one approval also covers a same-intent render
 Approve this full close? This one approval also covers a same-intent rendered final confirmation.
 ```
 
+## One exact-market cancellation approval
+
+```markdown
+**Approve cancellation of the current TrueNorth open orders**
+
+- Market: `[rendered market]`
+- Positions: `[rendered count and row]`
+- Open Orders: `[rendered count]`
+- Orders in scope: `[exact rendered rows]`
+- Cancellation control: `Open Orders → Cancel All`
+- Intent: `cancel the full currently rendered set`
+
+Approve this cancellation? This one approval covers one current `Cancel All` click and a same-intent rendered confirmation if one appears.
+```
+
 Re-read and report the current opening ticket, current close position row, and any final confirmation for visibility. Normal price movement, PNL, base-size rounding, calculated Order Value or Margin Required, fees, slippage, liquidation, estimated execution, or final submit wording do not create another confirmation. Ask again only when the requested market, side, Market/Limit type or limit price, leverage or amount target, TIF, protection, opening/close controls, or full-close intent cannot be honored, or when a failed attempt needs a new user choice.
 
 ## Result
 
 ```markdown
-**TrueNorth result:** `[Opened / Open order / Closed / Not closed / Not executed / Could not confirm]`
+**TrueNorth result:** `[Opened / Open order / Closed / Cancelled / Not closed / Not executed / Could not confirm]`
 
 - Market: `[observed market if rendered]`
 - Direction: `[observed side if rendered]`

@@ -32,24 +32,26 @@ When a user gives an amount with leverage — for example, `10 USDC at 3x` — t
 
 For a verified current position whose row visibly renders **Close → Market**, the skill may show one full-close card. One user approval covers that close control and a same-intent on-origin final confirmation. It always reads back the resulting position count/row and open orders; it never assumes that TP/SL orders were cancelled. A contextual ticket field cannot override that rendered read-back.
 
+For the current exact-market Open Orders view, the skill can also use the observed **Cancel All** control when the user explicitly approves cancellation of the full rendered set. Cancellation is separate from closing a position: it reads Positions and Open Orders afterward and never treats cancelled orders as a closed position.
+
 A normal `NO_MARKET_SETUP` or `NO_LIMIT_SETUP` ends that normal attempt. A user-requested lifecycle test instead uses `MARKET_TEST_SETUP`, so ordinary timing, confidence, or quality filters do not end the test. It is not trading advice and still requires the one current opening approval.
 
 ## Current scope
 
-- **Supported now:** one user-approved Market or Limit opening, including exact TP/SL attached at entry, plus a user-approved full Market close only from a verified current position whose rendered row exposes **Close → Market**.
-- **Not supported yet:** limit closes, resizing, reversing, cancelling, margin adjustment, TP/SL editing, or watcher controls.
+- **Supported now:** one user-approved Market or Limit opening, including exact TP/SL attached at entry; one user-approved full Market close from a verified current position whose rendered row exposes **Close → Market**; and one user-approved batch cancellation through the observed exact-market **Cancel All** control.
+- **Not supported yet:** limit closes, resizing, reversing, partial cancellation, order editing, margin adjustment, TP/SL editing, or watcher controls.
 - **Never automated:** wallet connection, signatures, passwords, permissions, and 2FA. The user handles those prompts directly.
 - **Never used:** direct Hyperliquid routes, APIs, backend automation, watcher controls, or attached agents.
 
 ## Files
 
 - `skills/truenorth-tradeflow/SKILL.md` — compact router and universal safety constraints.
-- `skills/truenorth-tradeflow/references/` — market-proposal, limit-proposal, market/limit ticket, lifecycle-test, and observed market-close procedures.
+- `skills/truenorth-tradeflow/references/` — market/limit proposals and tickets, lifecycle-test, exact-market cancellation, and observed market-close procedures.
 - `skills/truenorth-tradeflow/templates/order-card.md` — localized proposal, approval, and result format.
 
 ## Status
 
-`0.6.0` — Hermes-only Market and Limit opening workflow with one approval per opening or full-close action, explicit margin-before-leverage amount semantics, exact entry protection, and an observed-position Market-close route. Position rows/counts and Open Orders are the state proof; a ticket's contextual position text is not.
+`0.7.0` — Hermes-only Market and Limit opening workflow with one approval per opening, full-close, or exact-market batch-cancellation action, explicit margin-before-leverage amount semantics, exact entry protection, and observed rendered-state read-backs. Position rows/counts and Open Orders are the state proof; a ticket's contextual position text is not.
 
 ## License
 
