@@ -85,7 +85,7 @@ Re-read and report the current opening ticket, current close position row, and a
 - Market: `[observed market if rendered]`
 - Direction: `[observed side if rendered]`
 - Size: `[observed size if rendered]`
-- Status: `[observed status]`
+- Status: `[observed status; use Closed only when Positions is 0 and no row remains]`
 - Open Orders: `[observed count if relevant]`
 ```
 

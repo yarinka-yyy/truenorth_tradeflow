@@ -9,7 +9,7 @@ Verify the exact origin `https://truenorth.xyz`. In the rendered **Positions** v
 1. the requested market has a current position row;
 2. the row shows its current side and size;
 3. the row visibly exposes **Close** with a **Market** control; and
-4. current **Open Orders** and **Current Position** are read as the close baseline.
+4. the rendered **Positions** count/row and current **Open Orders** are read as the close baseline. A `Current Position` string inside an opening ticket may be reported for context but cannot replace the verified row.
 
 Do not use **Limit**, **Start Watcher**, margin adjustment, TP/SL editing, or a new opening ticket. If any required current control is absent or unclear, report that the full Market-close route is unavailable; do not infer a substitute.
 
@@ -25,7 +25,7 @@ Click the row's rendered **Market** control in the **Close** column once.
 
 If the close control opens an on-origin rendered confirmation:
 
-1. re-read its action, market, size, reduce/full-close intent, estimated execution, fees, slippage, protections, and final label;
+1. re-read its action, market, size, reduce/full-close intent, estimated execution, fees, slippage, protections, and final label. If it renders a close-size or percent field, require the approved full row size and `100%` before the final click;
 2. continue under the existing approval only when it still represents a full close of the approved current position; and
 3. click the rendered final control once without a second approval prompt.
 
@@ -33,9 +33,9 @@ If the rendered action is not a full close of that position, the state is unclea
 
 ## Read back and report
 
-Read the current **Positions**, **Open Orders**, and **Current Position** after the attempt.
+Read the current rendered **Positions** count/row and **Open Orders** after the attempt. A `Current Position` string inside an opening ticket is contextual only; if it conflicts with the rendered position state, report the discrepancy and do not take a further order action from it.
 
-- **Closed** — the position is no longer rendered and current position is flat.
+- **Closed** — the rendered Positions count is zero and the position row is no longer rendered.
 - **Not closed** — the position remains; report its current rendered state without retrying an uncertain click.
 - **Could not confirm** — the confirmation, session, or read-back became unclear.
 

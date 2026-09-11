@@ -37,7 +37,7 @@ If a wallet, signature, password, permission, or 2FA prompt appears at any time,
 
 ## Read back and report
 
-Read **Open Orders** and **Current Position** on the current TrueNorth page.
+Read rendered **Positions** (tab count and current row) alongside **Open Orders** on the current TrueNorth page. A `Current Position` string inside a working ticket is contextual only; it cannot establish that a position exists or is flat by itself. If the ticket string conflicts with the rendered position state, report the discrepancy and do not make a further order action from it.
 
 - **Opened** — a current position is rendered.
 - **Open order** — a current resting order is rendered.

@@ -20,11 +20,11 @@ For an explicit lifecycle test, the user can say:
 
 > Run a real ETH market lifecycle test. The setup does not need to be a good trade.
 
-For either opening request, the skill sends one matching current English analysis request to TrueNorth, returns a short source-attributed proposal in the user's language, renders the current ticket, and obtains one opening approval. That approval covers the same-intent rendered platform confirmation when one appears; it does not create a series of approval prompts from normal repricing. The skill then reads **Open Orders** and **Current Position** before reporting the result.
+For either opening request, the skill sends one matching current English analysis request to TrueNorth, returns a short source-attributed proposal in the user's language, renders the current ticket, and obtains one opening approval. That approval covers the same-intent rendered platform confirmation when one appears; it does not create a series of approval prompts from normal repricing. The skill then reads rendered **Positions** and **Open Orders** before reporting the result. A `Current Position` string inside an opening ticket is contextual only, not proof by itself.
 
 When a user gives an amount with leverage — for example, `10 USDC at 3x` — the amount means capital to use: target rendered **Margin Required = 10 USDC**. The visible Size control is adjusted only until the ticket shows that target; the skill never assumes a conversion. The rendered Order Value will usually be about `30 USDC`, but the UI is authoritative. A user can explicitly request ticket Size or Order Value instead.
 
-For a verified current position whose row visibly renders **Close → Market**, the skill may show one full-close card. One user approval covers that close control and a same-intent on-origin final confirmation. It always reads back the resulting positions and open orders; it never assumes that TP/SL orders were cancelled.
+For a verified current position whose row visibly renders **Close → Market**, the skill may show one full-close card. One user approval covers that close control and a same-intent on-origin final confirmation. It always reads back the resulting position count/row and open orders; it never assumes that TP/SL orders were cancelled. A contextual ticket field cannot override that rendered read-back.
 
 A normal `NO_MARKET_SETUP` ends that normal attempt. A user-requested lifecycle test instead uses `MARKET_TEST_SETUP`, so ordinary timing, confidence, or quality filters do not end the test. It is not trading advice and still requires the one current opening approval.
 
@@ -43,7 +43,7 @@ A normal `NO_MARKET_SETUP` ends that normal attempt. A user-requested lifecycle 
 
 ## Status
 
-`0.5.0` — Hermes-only market workflow with one approval per opening or full-close action, explicit margin-before-leverage amount semantics, and an observed-position Market-close route.
+`0.5.1` — Hermes-only market workflow with one approval per opening or full-close action, explicit margin-before-leverage amount semantics, and an observed-position Market-close route. Position rows/counts are the state proof; a ticket's contextual position text is not.
 
 ## License
 
