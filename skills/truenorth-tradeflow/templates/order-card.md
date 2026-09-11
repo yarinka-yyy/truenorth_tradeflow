@@ -60,17 +60,33 @@ This is a real interface/lifecycle test, not a trading recommendation. The rende
 Approve this current opening? This one approval also covers a same-intent rendered final confirmation.
 ```
 
-Re-read and report the current ticket and final confirmation for visibility. Normal price movement, base-size rounding, calculated Order Value or Margin Required, fees, slippage, liquidation, estimated execution, or final submit wording do not create another confirmation. Ask again only when the requested market, side, Market type, leverage or amount target, protection, or opening controls cannot be honored, or when a failed attempt needs a new user choice.
+## One full-close approval
+
+```markdown
+**Approve the current TrueNorth full Market close**
+
+- Market: `[rendered market]`
+- Current position: `[rendered side and size]`
+- Close route: `Positions → Close → Market`
+- Intent: `full close`
+- Current Open Orders: `[rendered count]`
+- Close control: `[rendered Market label]`
+
+Approve this full close? This one approval also covers a same-intent rendered final confirmation.
+```
+
+Re-read and report the current opening ticket, current close position row, and any final confirmation for visibility. Normal price movement, PNL, base-size rounding, calculated Order Value or Margin Required, fees, slippage, liquidation, estimated execution, or final submit wording do not create another confirmation. Ask again only when the requested market, side, Market type, leverage or amount target, protection, opening/close controls, or full-close intent cannot be honored, or when a failed attempt needs a new user choice.
 
 ## Result
 
 ```markdown
-**TrueNorth result:** `[Opened / Open order / Not executed / Could not confirm]`
+**TrueNorth result:** `[Opened / Open order / Closed / Not closed / Not executed / Could not confirm]`
 
 - Market: `[observed market if rendered]`
 - Direction: `[observed side if rendered]`
 - Size: `[observed size if rendered]`
 - Status: `[observed status]`
+- Open Orders: `[observed count if relevant]`
 ```
 
 Never populate the result from a button click, toast, wallet prompt, or chat response alone.
