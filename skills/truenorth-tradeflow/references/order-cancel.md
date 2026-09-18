@@ -1,34 +1,23 @@
-# Verified exact-market open-order cancellation
+# Verified full-set open-order cancellation
 
-Read this reference only when the user explicitly asks to cancel the current resting setup. This is an order-cancellation route, not a position close. It supports one observed batch-cancellation control for the current exact-market Open Orders view; it does not support editing, resizing, reversing, or partial row cancellation.
+Read this reference only when the user explicitly asks to cancel current resting orders. This route uses the rendered **Open Orders → Cancel All** control only when its entire possible scope is readable and approved. The observed Open Orders filter offers **All**, **Active**, **Long**, and **Short**, with no market filter; do not describe `Cancel All` as exact-market scoped. It does not close a position or support single-row cancellation, edits, resizing, or reversing.
 
-## Establish the cancellation scope
+## Establish the complete scope
 
-Verify the exact origin `https://app.truenorth.xyz` and the selected market. Read rendered **Positions** and **Open Orders** together before any cancellation action. List the exact current order rows and their count in the user-facing card.
-
-Use this route only when:
-
-1. the current market is rendered;
-2. the current Open Orders rows are readable;
-3. the user has explicitly chosen to cancel the full currently rendered set; and
-4. the rendered **Cancel All** control is present and belongs to that current Open Orders view.
-
-Do not infer that a row's `Cancel` control has the same scope as `Cancel All`. Do not use this route for a single-row cancellation, edits, resizing, reversing, or a position close unless that separate rendered path is observed and documented.
+Verify the exact origin `https://app.truenorth.xyz` and selected trading account. Choose the rendered **All** filter, then read the complete Open Orders count and every row, including market, type, direction, size, and trigger condition. Read **Positions** separately. Continue only if the rows are fully visible, the count matches them, no pagination or hidden rows remain, and **Cancel All** is present in this same view. If the user named one market, every row in the complete set must belong to that market; otherwise stop and explain that this control may affect other markets. If no rows remain, report that there is nothing to cancel.
 
 ## Get one cancellation approval
 
-Show the cancellation card from `templates/order-card.md`. The approval must name the current market, Positions state, Open Orders count, the exact rows in scope, and the rendered `Cancel All` control. One approval covers one current batch-cancellation click and a same-intent rendered confirmation if the UI adds one.
+Show the cancellation card from `templates/order-card.md` with every row in scope and explain that `Cancel All` may apply to the complete account Open Orders set. The user's approval covers that complete rendered set and one same-intent on-origin confirmation. Do not infer that an earlier trade approval authorizes cancellation.
 
-Immediately before the click, re-read the same market, order count, rows, flat/position state, and `Cancel All` control. If the scope changed, the control disappeared, the page is off-origin, or the state is unclear, stop and ask for a new current choice.
-
-Click the rendered **Cancel All** control once. If a wallet, signature, password, permission, recovery, or 2FA prompt appears, stop and let the user handle it.
+Immediately before the click, re-read the same account, **All** filter, complete row set, count, Positions state, and `Cancel All` control. If any row or scope changed, a row is hidden, or the state is unclear, stop for a new current choice. Click **Cancel All** once. If an on-origin confirmation appears, re-read its scope and click once only if it still names the approved complete set. The user handles any wallet, signature, password, permission, recovery, or 2FA prompt. Do not retry an uncertain click.
 
 ## Read back and report
 
-Read rendered **Open Orders** and **Positions** after the click. A toast or button response is not enough.
+Read **Open Orders** in the **All** view and **Positions** after the click and compare the named rows with the baseline.
 
-- **Cancelled** — Open Orders renders zero and the named rows are gone; report Positions separately because cancellation does not close a position.
-- **Not cancelled** — any named order remains or the read-back is unclear; do not retry automatically.
-- **Could not confirm** — the session, origin, or rendered state became unclear.
+- **Cancelled** — every approved row is gone; report Positions separately because cancellation does not close a position.
+- **Not cancelled** — an approved row remains after a completed flow; do not retry automatically.
+- **Could not confirm** — the session, account, origin, or rendered scope became unclear.
 
 Never claim that a position was closed because its protective or entry orders were cancelled. A current position requires the separate verified-position full Market-close route and its own approval.

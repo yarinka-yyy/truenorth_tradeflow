@@ -4,7 +4,7 @@ Read this reference only when the user asks for a current **limit** entry and ha
 
 ## Ask TrueNorth once
 
-Verify the exact origin `https://app.truenorth.xyz`, then send exactly one current English analysis-only request. Replace bracketed values with the current request.
+Verify the exact origin `https://app.truenorth.xyz`. For an opening request, first collect missing market, order type, leverage, and amount in one question; an amount with leverage means target Margin Required unless the user explicitly says otherwise. An analysis-only request needs none of the execution choices. Then send exactly one current English analysis-only request, replacing bracketed values with current facts.
 
 ```text
 Analyze one current [TOKEN]-USDC LIMIT entry for the current market, using these current user constraints: [leverage and amount semantics, or explicitly requested ticket Size or Order Value].
@@ -20,13 +20,14 @@ Wait for the completed response. A heading, badge, partial stream, or agent thou
 
 ## Turn the result into a proposal
 
-Use `templates/order-card.md` in the language of the current conversation.
+Use `templates/order-card.md` in the language of the current conversation. For an opening, keep the provider summary until the ticket is built and combine both in one approval card; do not ask the user to approve a preliminary proposal.
 
 - Attribute the proposal to TrueNorth rather than presenting it as fact.
 - Include the exact limit entry price and exact TP/SL values when the response provides them.
 - Keep the reason to one short sentence and state confidence when shown.
 - A completed `NO_LIMIT_SETUP` ends this attempt. Never replace it with a Market order.
-- Merge current user choices with the completed result. Ask the user one short question for all choices absent from both, including direction, limit price, leverage plus target rendered Margin Required (or explicitly requested ticket Size/Order Value), and TP/SL-or-none.
+- If the provider names a different market or its stated validity or invalidation condition has explicitly been met, do not treat its level as a current opening setup. Normal movement in the live quote alone does not change the exact proposed Limit price. Report when the one provider request did not yield a usable current ticket; do not silently reuse an older chat.
+- Merge current user choices with the completed result. If an opening still lacks direction, an exact limit price, or an explicit TP/SL-or-none choice, ask one short question covering all remaining choices. Do not treat this informational proposal as trade approval.
 - A current user choice overrides a provider recommendation. Do not infer a price, amount, unit, protection state, or fallback order type.
 
-Continue with `references/limit-ticket.md` only after the required current choices are explicit.
+For analysis-only requests, return the proposal and stop. For an opening, continue with `references/limit-ticket.md` only after the required current choices are explicit.

@@ -6,10 +6,10 @@ Read this reference only when the user explicitly asks to close and the current 
 
 Verify the exact origin `https://app.truenorth.xyz`. In the rendered **Positions** view, confirm all of the following before any close action:
 
-1. the requested market has a current position row;
+1. the selected trading account and requested market have a current position row;
 2. the row shows its current side and size;
 3. the row visibly exposes **Close** with a **Market** control; and
-4. the rendered **Positions** count/row and current **Open Orders** are read as the close baseline. A `Current Position` string inside an opening ticket may be reported for context but cannot replace the verified row.
+4. the exact-market position row and current **Open Orders** rows are read as the close baseline. Other markets' positions may exist; a `Current Position` string inside an opening ticket cannot replace the verified row.
 
 Do not use **Limit**, **Start Watcher**, margin adjustment, TP/SL editing, or a new opening ticket. If any required current control is absent or unclear, report that the full Market-close route is unavailable; do not infer a substitute.
 
@@ -17,7 +17,7 @@ Do not use **Limit**, **Start Watcher**, margin adjustment, TP/SL editing, or a 
 
 Show the full-close card from `templates/order-card.md`. The user approves one current full-close intent: the current rendered market and position, the rendered **Close → Market** control, and a full reduction of that position.
 
-Immediately before the click, re-read that the same current position row, market, side, and full position size from the approved card remain rendered, and that the same **Close → Market** control is present. If the position disappeared, changed market, side, or full size, or the close control changed, show the current state and obtain one replacement full-close approval before acting. Do not ask again for normal price, PNL, converted-size, fee, slippage, liquidation, or estimated-execution refreshes.
+Immediately before the click, re-read that the same account, position row, market, side, and full position size from the approved card remain rendered, and that the same **Close → Market** control is present. If the position disappeared, changed market, side, or full size, or the close control changed, show the current state and obtain one replacement full-close approval before acting. Do not ask again for normal price, PNL, converted-size, fee, slippage, liquidation, or estimated-execution refreshes.
 
 Click the row's rendered **Market** control in the **Close** column once.
 
@@ -33,10 +33,10 @@ If the rendered action is not a full close of that position, the state is unclea
 
 ## Read back and report
 
-Read the current rendered **Positions** count/row and **Open Orders** after the attempt. A `Current Position` string inside an opening ticket is contextual only; if it conflicts with the rendered position state, report the discrepancy and do not take a further order action from it.
+Read the selected account's exact-market **Positions** row and **Open Orders** rows after the attempt and compare them with the baseline. A `Current Position` string inside an opening ticket is contextual only; if it conflicts with the rendered position state, report the discrepancy and do not take a further order action from it.
 
-- **Closed** — the rendered Positions count is zero and the position row is no longer rendered.
-- **Not closed** — the position remains; report its current rendered state without retrying an uncertain click.
+- **Closed** — the approved exact-market position row is absent or rendered flat. Other markets may keep the overall Positions count above zero.
+- **Not closed** — the approved position remains; report its current rendered state without retrying an uncertain click.
 - **Could not confirm** — the confirmation, session, or read-back became unclear.
 
 Report remaining open orders exactly as rendered. Do not assume that opening TP/SL orders were cancelled, and do not cancel them through an unobserved route.

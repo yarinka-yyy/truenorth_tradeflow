@@ -4,7 +4,7 @@ Read this reference only when the user explicitly asks to exercise a real curren
 
 ## Collect the setup once
 
-Verify the exact origin `https://app.truenorth.xyz`, then send exactly one current English analysis-only request. Replace bracketed values only with current facts and user choices.
+Before browsing, collect missing market, leverage, and amount in one question; this route already specifies Market. An amount with leverage means target Margin Required unless the user explicitly says otherwise. Verify the exact origin `https://app.truenorth.xyz`, then send exactly one current English analysis-only request. Replace bracketed values only with current facts and user choices.
 
 ```text
 The user explicitly requests a real TrueNorth interface and market-lifecycle test for the currently selected [TOKEN]-USDC market. This is not a request for trading advice: normal quality, confidence, reward/risk, or timing filters must not prevent the test.
@@ -24,6 +24,6 @@ A completed test setup must name the selected market, explicit Long or Short dir
 
 - A completed `MARKET_TEST_SETUP` meeting those fields is usable even when its reason says the timing or quality is poor.
 - If the response is `TEST_SETUP_UNAVAILABLE`, `NO_TRADE`, `NO_MARKET_SETUP`, or lacks direction or protection, ask the user once for all missing current choices. Do not send a second provider prompt, reuse stale data, or invent a direction or protection state.
-- If the user has not chosen leverage and target rendered Margin Required, or has not explicitly chosen ticket Size/Order Value instead, collect that current choice now. Do not use a stored cap, a default amount, or a formula.
+- If an execution choice is still missing after the initial question, collect it before building a ticket. Do not use a stored cap, a default amount, or a formula.
 
-Use the lifecycle-test proposal card in `templates/order-card.md`, mark it as a real interface/lifecycle test rather than a recommendation, then continue with `references/market-ticket.md`.
+Keep the lifecycle-test summary until the ticket is built; include the short test context in the single opening approval card from `templates/order-card.md`, mark it as a real interface/lifecycle test rather than a recommendation, then continue with `references/market-ticket.md`.
