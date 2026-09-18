@@ -31,7 +31,7 @@ Do not use this skill for direct Hyperliquid navigation, exchange APIs, wallet s
 
 ## Common rules
 
-1. Begin at `https://truenorth.xyz` and stop on every off-origin redirect, popup, or link.
+1. Begin at `https://app.truenorth.xyz` and stop on every off-origin redirect, popup, or link.
 2. Send one consolidated current TrueNorth request for an opening. A normal Market request uses the market-proposal route; a normal Limit request uses the limit-proposal route; an explicit market lifecycle test uses `MARKET_TEST_SETUP`, even when ordinary quality is weak. This choice and every user parameter apply only to the current request.
 3. Keep Market and Limit distinct. This release supports Market and Limit openings, the observed exact-market Open Orders **Cancel All** route, and only the observed verified-position row's rendered **Close → Market** route. Never silently substitute an entry type, and never treat a resting Limit order as a position.
 4. Current user choices override a provider recommendation. An amount supplied with leverage means the user's target rendered **Margin Required**, unless the user explicitly calls it ticket Size or Order Value. Adjust only the visible Size control until the target is rendered; do not assume a leverage formula or choose a nearby amount. Do not store a cap, leverage, size, protection, test mode, or other personal policy.

@@ -4,7 +4,7 @@ Read this reference only when the user explicitly asks to close and the current 
 
 ## Observe the current position
 
-Verify the exact origin `https://truenorth.xyz`. In the rendered **Positions** view, confirm all of the following before any close action:
+Verify the exact origin `https://app.truenorth.xyz`. In the rendered **Positions** view, confirm all of the following before any close action:
 
 1. the requested market has a current position row;
 2. the row shows its current side and size;

@@ -4,7 +4,7 @@ Read this reference only when the user explicitly asks to cancel the current res
 
 ## Establish the cancellation scope
 
-Verify the exact origin `https://truenorth.xyz` and the selected market. Read rendered **Positions** and **Open Orders** together before any cancellation action. List the exact current order rows and their count in the user-facing card.
+Verify the exact origin `https://app.truenorth.xyz` and the selected market. Read rendered **Positions** and **Open Orders** together before any cancellation action. List the exact current order rows and their count in the user-facing card.
 
 Use this route only when:
 

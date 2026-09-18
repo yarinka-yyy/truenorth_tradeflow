@@ -4,7 +4,7 @@ Read this reference only when the user asks for a current **limit** entry and ha
 
 ## Ask TrueNorth once
 
-Verify the exact origin `https://truenorth.xyz`, then send exactly one current English analysis-only request. Replace bracketed values with the current request.
+Verify the exact origin `https://app.truenorth.xyz`, then send exactly one current English analysis-only request. Replace bracketed values with the current request.
 
 ```text
 Analyze one current [TOKEN]-USDC LIMIT entry for the current market, using these current user constraints: [leverage and amount semantics, or explicitly requested ticket Size or Order Value].

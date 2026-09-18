@@ -4,7 +4,7 @@ Read this reference only when the user explicitly asks to exercise a real curren
 
 ## Collect the setup once
 
-Verify the exact origin `https://truenorth.xyz`, then send exactly one current English analysis-only request. Replace bracketed values only with current facts and user choices.
+Verify the exact origin `https://app.truenorth.xyz`, then send exactly one current English analysis-only request. Replace bracketed values only with current facts and user choices.
 
 ```text
 The user explicitly requests a real TrueNorth interface and market-lifecycle test for the currently selected [TOKEN]-USDC market. This is not a request for trading advice: normal quality, confidence, reward/risk, or timing filters must not prevent the test.

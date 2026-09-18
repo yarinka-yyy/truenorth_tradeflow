@@ -1,6 +1,6 @@
 # TrueNorth TradeFlow
 
-One installable skill for Hermes Agent and Codex. It asks TrueNorth's on-site AI for a current setup, shows the user the rendered order ticket, and reads the rendered result after the permitted action. All site interaction stays in Chrome at `https://truenorth.xyz`.
+One installable skill for Hermes Agent and Codex. It asks TrueNorth's on-site AI for a current setup, shows the user the rendered order ticket, and reads the rendered result after the permitted action. All site interaction stays in Chrome at `https://app.truenorth.xyz`.
 
 ## Install
 

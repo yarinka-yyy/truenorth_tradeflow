@@ -4,7 +4,7 @@ Read this reference only when the user asks for a current **market** proposal an
 
 ## Ask TrueNorth once
 
-Verify the exact origin `https://truenorth.xyz`, then send exactly one current English analysis-only request. Replace bracketed values with the current request.
+Verify the exact origin `https://app.truenorth.xyz`, then send exactly one current English analysis-only request. Replace bracketed values with the current request.
 
 ```text
 Analyze one current [TOKEN]-USDC MARKET entry for [TIMEFRAME or current market].
