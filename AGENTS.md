@@ -1,5 +1,13 @@
 # TrueNorth TradeFlow
 
+## Repository layout
+
+- This directory (`app/` in the parent workspace) is the Git repository root. Keep `.git`, `.gitignore`, `LICENSE`, and `README.md` here. Run Git commands from this directory, or use `git -C app ...` from the parent workspace.
+- `skills/truenorth-tradeflow/` contains the existing skill. Keep its installable layout and relative references intact.
+- `soft/` is reserved for the future standalone software and currently contains only `.gitkeep`; do not implement it as part of this reorganization.
+- The parent workspace's `doc/`, `plans/`, and `AGENTS.md` are local workspace materials outside this repository. Do not stage or publish them automatically.
+- `README.md` is intentionally empty at the user's request. Populate it only when requested.
+
 ## Project rules
 
 - Keep this repository public, minimal, and installable as one skill in Hermes and Codex.
