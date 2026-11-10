@@ -19,6 +19,7 @@ internal static class Program
     {
         var originalCulture = CultureInfo.CurrentCulture;
         var entryEligibilityOnly = args.Contains("--entry-eligibility", StringComparer.Ordinal);
+        var recoveryOnly = args.Contains("--notifications-recovery", StringComparer.Ordinal);
         var fixtureRoot = Path.Combine(ArtifactsDirectory(), ".fixtures", Guid.NewGuid().ToString("N"));
         try
         {
@@ -28,6 +29,22 @@ internal static class Program
                 EntryEligibilityChecks.CheckCore(Check);
                 EntryEligibilityChecks.CheckNativeWpf(Check, fixtureRoot);
                 Console.WriteLine($"PASS: {_checks} entry-eligibility assertions (--entry-eligibility)");
+                return 0;
+            }
+            if (recoveryOnly)
+            {
+                RecoveryChecks.CheckCore(Check, fixtureRoot);
+                var app = new App();
+                app.InitializeComponent();
+                try
+                {
+                    RecoveryChecks.CheckNativeWpf(Check, fixtureRoot);
+                }
+                finally
+                {
+                    app.Shutdown();
+                }
+                Console.WriteLine($"PASS: {_checks} notifications-recovery assertions (--notifications-recovery)");
                 return 0;
             }
 
@@ -43,6 +60,7 @@ internal static class Program
             AiTestChecks.CheckCore(Check, fixtureRoot);
             AccountReadChecks.CheckCore(Check);
             EntryEligibilityChecks.CheckCore(Check);
+            RecoveryChecks.CheckCore(Check, fixtureRoot);
             CheckNativeWpf(fixtureRoot);
             Console.WriteLine($"PASS: {_checks} assertions");
             return 0;
@@ -55,7 +73,7 @@ internal static class Program
         finally
         {
             CultureInfo.CurrentCulture = originalCulture;
-            if (entryEligibilityOnly)
+            if (entryEligibilityOnly || recoveryOnly)
                 Application.Current?.Shutdown();
             try
             {
@@ -568,6 +586,7 @@ internal static class Program
             AiTestChecks.CheckMainWindow(Check, app, root);
             AccountReadChecks.CheckNativeWpf(Check, root);
             EntryEligibilityChecks.CheckNativeWpf(Check, root);
+            RecoveryChecks.CheckNativeWpf(Check, root);
         }
         finally
         {

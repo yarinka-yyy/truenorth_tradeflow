@@ -153,6 +153,9 @@
                            Foreground="{StaticResource MutedBrush}" Margin="19,8,0,0" TextWrapping="Wrap" />
                 <TextBlock x:Name="OperatingIntentText" Foreground="{StaticResource MutedBrush}"
                            Margin="19,8,0,0" TextWrapping="Wrap" />
+                <TextBlock x:Name="RecoveryStatusText" Foreground="{StaticResource WarningBrush}"
+                           Margin="19,8,0,0" TextWrapping="Wrap" Visibility="Collapsed"
+                           AutomationProperties.LiveSetting="Polite" />
               </StackPanel>
             </Border>
 

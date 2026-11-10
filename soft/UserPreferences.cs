@@ -13,6 +13,11 @@ internal static class UserPreferences
         "TrueNorth TradeFlow",
         "settings.json");
 
+    internal static string RecoveryStatePath => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "TrueNorth TradeFlow",
+        "recovery-state.json");
+
     internal static bool? ReadLegacyPreventSleep()
     {
         using var key = Registry.CurrentUser.OpenSubKey(KeyPath);

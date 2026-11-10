@@ -8,6 +8,7 @@ using System.Windows;
 using System.Windows.Controls;
 using TextBox = System.Windows.Controls.TextBox;
 using TrueNorth.TradeFlow.Account;
+using TrueNorth.TradeFlow.Recovery;
 using TrueNorth.TradeFlow.Risk;
 
 namespace TrueNorth.TradeFlow;
@@ -19,6 +20,7 @@ public partial class MainWindow : Window
     private readonly ITrueNorthSessionService _trueNorthSession;
     private readonly IAiAnalysisSource _aiAnalysisSource;
     private readonly AiTestReportStore _aiTestReportStore;
+    private readonly RecoveryCoordinator? _recoveryCoordinator;
     private readonly ObservableCollection<AssetDraft> _assetRows = [];
     private SettingsProfile _savedProfile;
     private SettingsFileStatus _fileStatus;
@@ -50,7 +52,8 @@ public partial class MainWindow : Window
         WakeProtectionController wakeProtection,
         ITrueNorthSessionService? trueNorthSession = null,
         IAiAnalysisSource? aiAnalysisSource = null,
-        AiTestReportStore? aiTestReportStore = null)
+        AiTestReportStore? aiTestReportStore = null,
+        RecoveryCoordinator? recoveryCoordinator = null)
     {
         InitializeComponent();
         _settingsStore = settingsStore;
@@ -63,7 +66,10 @@ public partial class MainWindow : Window
         _trueNorthSession = trueNorthSession ?? new TrueNorthSessionService();
         _aiAnalysisSource = aiAnalysisSource ?? new SyntheticAiAnalysisSource();
         _aiTestReportStore = aiTestReportStore ?? new AiTestReportStore(AiTestReportStore.DefaultDirectory());
+        _recoveryCoordinator = recoveryCoordinator;
         _wakeProtection.StateChanged += UpdatePowerStatusFromController;
+        if (_recoveryCoordinator is not null)
+            _recoveryCoordinator.StatusChanged += UpdateRecoveryStatusFromCoordinator;
         _appliedPreventSleep = _savedProfile.Settings.PreventSleep;
         SimulationContent.StartRequested += (_, _) => SimulationContent.Start(
             SimulationNotificationPreferences.Capture(_savedProfile.Settings));
@@ -91,6 +97,7 @@ public partial class MainWindow : Window
         _ready = true;
 
         UpdateMonitoringIntent();
+        UpdateRecoveryStatus();
         UpdatePowerStatus();
         UpdateTrueNorthSessionCard();
         UpdateModeLabel();
@@ -533,6 +540,24 @@ public partial class MainWindow : Window
         OperatingIntentText.Text = _savedProfile.SavedOperatingIntent
             ? "Сохранённое намерение: запустить. Фактический мониторинг не запущен."
             : "Сохранённое намерение: остановить. Фактический мониторинг не запущен.";
+    }
+
+    private void UpdateRecoveryStatus()
+    {
+        var pending = _recoveryCoordinator?.HasPendingRecovery == true;
+        RecoveryStatusText.Text = pending ? _recoveryCoordinator!.StatusText : string.Empty;
+        RecoveryStatusText.Visibility = pending ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void UpdateRecoveryStatusFromCoordinator()
+    {
+        if (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished)
+            return;
+
+        if (Dispatcher.CheckAccess())
+            UpdateRecoveryStatus();
+        else
+            Dispatcher.BeginInvoke(new Action(UpdateRecoveryStatus));
     }
 
     private void LoadDraft(AppSettings settings)

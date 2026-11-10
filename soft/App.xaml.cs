@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Threading;
 using System.Windows;
 using System.Windows.Threading;
+using TrueNorth.TradeFlow.Recovery;
 using Forms = System.Windows.Forms;
 
 namespace TrueNorth.TradeFlow;
@@ -19,6 +20,7 @@ public partial class App : System.Windows.Application
     private Forms.NotifyIcon? _trayIcon;
     private WakeProtectionController? _wakeProtection;
     private TrueNorthSessionService? _sessionService;
+    private RecoveryCoordinator? _recoveryCoordinator;
     private MainWindow? _mainWindow;
     private bool _ownsMutex;
     private bool _isClosing;
@@ -58,9 +60,12 @@ public partial class App : System.Windows.Application
 
         var settingsStore = new SettingsStore(UserPreferences.SettingsPath, UserPreferences.ReadLegacyPreventSleep);
         var settings = settingsStore.Load();
+        _recoveryCoordinator = new RecoveryCoordinator(
+            new RecoveryJournalStore(UserPreferences.RecoveryStatePath), settings.Profile.Settings);
         _wakeProtection = new WakeProtectionController(settings.Profile.Settings.PreventSleep);
         _sessionService = new TrueNorthSessionService();
-        _mainWindow = new MainWindow(settingsStore, settings, _wakeProtection, _sessionService);
+        _mainWindow = new MainWindow(settingsStore, settings, _wakeProtection, _sessionService,
+            recoveryCoordinator: _recoveryCoordinator);
         MainWindow = _mainWindow;
         _mainWindow.ShowInTaskbar = false;
         InitializeTrayIcon();
