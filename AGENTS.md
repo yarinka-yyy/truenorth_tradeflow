@@ -4,16 +4,19 @@
 
 - This directory (`app/` in the parent workspace) is the Git repository root. Keep `.git`, `.gitignore`, `LICENSE`, and `README.md` here. Run Git commands from this directory, or use `git -C app ...` from the parent workspace.
 - `skills/truenorth-tradeflow/` contains the existing skill. Keep its installable layout and relative references intact.
-- `soft/` is reserved for the future standalone software and currently contains only `.gitkeep`; do not implement it as part of this reorganization.
-- The parent workspace's `doc/`, `plans/`, and `AGENTS.md` are local workspace materials outside this repository. Do not stage or publish them automatically.
+- `soft/` contains the standalone Windows application, its verification code, and installer build scripts.
+- The parent workspace's `doc/`, `plans/`, `artifacts/`, and `AGENTS.md` are local workspace materials outside this repository. Do not stage or publish them.
 - `README.md` is intentionally empty at the user's request. Populate it only when requested.
 
 ## Project rules
 
-- Keep this repository public, minimal, and installable as one skill in Hermes and Codex.
-- Commit and push every verified logical change to `origin/main`.
-- Keep only portable instructions, templates, and UI observations. Never publish account data, addresses, screenshots, chat history, credentials, signatures, or personal risk settings.
-- Use `https://app.truenorth.xyz` as the sole browser origin. Do not add direct Hyperliquid browsing, APIs, signing, or backend routes.
+- Keep this repository public and minimal. Preserve the skill's installable layout in Hermes and Codex.
+- After each completed and verified block of work, stage only its publishable changes, commit, and push to `origin/main` before starting the next block. If a push fails, keep the local commit and report the failure.
+- Publish portable skill materials and Windows application sources, verification code, and build scripts. Keep generated files, local settings, and browser profiles out of Git. Never publish account data, addresses, screenshots, chat history, credentials, signatures, or personal risk settings.
+- Use `https://app.truenorth.xyz` as the sole browser origin for TrueNorth. Do not add direct Hyperliquid browsing, APIs, signing, or backend routes.
+
+## Skill rules
+
 - Keep the workflow human-led: collect missing execution choices together; for an opening, combine the short TrueNorth proposal and current ticket in one approval card covering a same-intent rendered final confirmation. Analysis-only requests receive an informational proposal without trade approval. Act once and compare exact-market rows with the pre-action state. Normal Market price or estimate movement alone does not require another approval; a changed intent, invalid protection, uncertain state, or protected prompt does.
 - Do not store user caps, token allowlists, review modes, test modes, or other personal policy as skill configuration. An amount stated with leverage means the current target rendered Margin Required unless the user explicitly names ticket Size or Order Value; leverage and protection choices belong to the current user request.
 - Use only documented rendered paths for Market or Limit opening, a full Market close from a verified current position, and `Cancel All` only when the complete account Open Orders set is readable and approved. Do not assume `Cancel All` is market-specific. Resizing, reversing, partial cancellation, and watcher paths remain unsupported until their own rendered paths are verified.
