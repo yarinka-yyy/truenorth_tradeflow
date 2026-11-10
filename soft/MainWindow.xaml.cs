@@ -58,7 +58,8 @@ public partial class MainWindow : Window
         AiTestReportStore? aiTestReportStore = null,
         RecoveryCoordinator? recoveryCoordinator = null,
         NotificationDispatcher? notificationDispatcher = null,
-        TelegramCredentialStore? telegramCredentialStore = null)
+        TelegramCredentialStore? telegramCredentialStore = null,
+        string? processRecoveryStatus = null)
     {
         InitializeComponent();
         _settingsStore = settingsStore;
@@ -105,6 +106,7 @@ public partial class MainWindow : Window
 
         UpdateMonitoringIntent();
         UpdateRecoveryStatus();
+        UpdateProcessRecoveryStatus(processRecoveryStatus);
         UpdatePowerStatus();
         UpdateTrueNorthSessionCard();
         UpdateModeLabel();
@@ -567,6 +569,23 @@ public partial class MainWindow : Window
             UpdateRecoveryStatus();
         else
             Dispatcher.BeginInvoke(new Action(UpdateRecoveryStatus));
+    }
+
+    internal void UpdateProcessRecoveryStatus(string? message)
+    {
+        if (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished)
+            return;
+
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.BeginInvoke(new Action(() => UpdateProcessRecoveryStatus(message)));
+            return;
+        }
+
+        ProcessRecoveryStatusText.Text = message ?? string.Empty;
+        ProcessRecoveryStatusText.Visibility = string.IsNullOrWhiteSpace(message)
+            ? Visibility.Collapsed
+            : Visibility.Visible;
     }
 
     private void LoadDraft(AppSettings settings)

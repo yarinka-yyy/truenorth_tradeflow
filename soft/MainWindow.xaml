@@ -156,6 +156,9 @@
                 <TextBlock x:Name="RecoveryStatusText" Foreground="{StaticResource WarningBrush}"
                            Margin="19,8,0,0" TextWrapping="Wrap" Visibility="Collapsed"
                            AutomationProperties.LiveSetting="Polite" />
+                <TextBlock x:Name="ProcessRecoveryStatusText" Foreground="{StaticResource WarningBrush}"
+                           Margin="19,8,0,0" TextWrapping="Wrap" Visibility="Collapsed"
+                           AutomationProperties.LiveSetting="Polite" />
               </StackPanel>
             </Border>
 

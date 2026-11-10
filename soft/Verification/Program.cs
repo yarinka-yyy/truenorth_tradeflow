@@ -18,12 +18,23 @@ internal static class Program
     private static int Main(string[] args)
     {
         var originalCulture = CultureInfo.CurrentCulture;
+        if (args.Contains("--process-recovery-test-worker", StringComparer.Ordinal))
+            return ProcessRecoveryChecks.RunWorker(args);
+
         var entryEligibilityOnly = args.Contains("--entry-eligibility", StringComparer.Ordinal);
         var recoveryOnly = args.Contains("--notifications-recovery", StringComparer.Ordinal);
+        var processRecoveryRuntimeOnly = args.Contains("--process-recovery-runtime", StringComparer.Ordinal);
         var fixtureRoot = Path.Combine(ArtifactsDirectory(), ".fixtures", Guid.NewGuid().ToString("N"));
         try
         {
             Directory.CreateDirectory(fixtureRoot);
+            if (processRecoveryRuntimeOnly)
+            {
+                ProcessRecoveryChecks.CheckCore(Check, fixtureRoot);
+                ProcessRecoveryChecks.CheckApplicationRuntime(Check, fixtureRoot);
+                Console.WriteLine($"PASS: {_checks} process-recovery runtime assertions (--process-recovery-runtime)");
+                return 0;
+            }
             if (entryEligibilityOnly)
             {
                 EntryEligibilityChecks.CheckCore(Check);
@@ -34,13 +45,17 @@ internal static class Program
             if (recoveryOnly)
             {
                 RecoveryChecks.CheckCore(Check, fixtureRoot);
+                ProcessRecoveryChecks.CheckCore(Check, fixtureRoot);
+                ProcessRecoveryChecks.CheckRuntime(Check, fixtureRoot);
                 NotificationChecks.CheckCore(Check, fixtureRoot);
                 var app = new App();
                 app.InitializeComponent();
                 try
                 {
                     RecoveryChecks.CheckNativeWpf(Check, fixtureRoot);
-                    NotificationChecks.CheckNativeWpf(Check, fixtureRoot, exerciseWindowsBalloon: true);
+                    ProcessRecoveryChecks.CheckNativeWpf(Check, fixtureRoot);
+                    NotificationChecks.CheckNativeWpf(Check, fixtureRoot,
+                        exerciseWindowsBalloon: args.Contains("--observe-windows-notification", StringComparer.Ordinal));
                 }
                 finally
                 {
@@ -63,6 +78,8 @@ internal static class Program
             AccountReadChecks.CheckCore(Check);
             EntryEligibilityChecks.CheckCore(Check);
             RecoveryChecks.CheckCore(Check, fixtureRoot);
+            ProcessRecoveryChecks.CheckCore(Check, fixtureRoot);
+            ProcessRecoveryChecks.CheckRuntime(Check, fixtureRoot);
             NotificationChecks.CheckCore(Check, fixtureRoot);
             CheckNativeWpf(fixtureRoot);
             Console.WriteLine($"PASS: {_checks} assertions");
@@ -76,7 +93,7 @@ internal static class Program
         finally
         {
             CultureInfo.CurrentCulture = originalCulture;
-            if (entryEligibilityOnly || recoveryOnly)
+            if (entryEligibilityOnly || recoveryOnly || processRecoveryRuntimeOnly)
                 Application.Current?.Shutdown();
             try
             {
@@ -590,6 +607,7 @@ internal static class Program
             AccountReadChecks.CheckNativeWpf(Check, root);
             EntryEligibilityChecks.CheckNativeWpf(Check, root);
             RecoveryChecks.CheckNativeWpf(Check, root);
+            ProcessRecoveryChecks.CheckNativeWpf(Check, root);
             NotificationChecks.CheckNativeWpf(Check, root);
         }
         finally
