@@ -1,0 +1,213 @@
+<Application x:Class="TrueNorth.TradeFlow.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             ShutdownMode="OnExplicitShutdown">
+  <Application.Resources>
+    <SolidColorBrush x:Key="CanvasBrush" Color="#101820" />
+    <SolidColorBrush x:Key="RailBrush" Color="#111D27" />
+    <SolidColorBrush x:Key="PanelBrush" Color="#18242E" />
+    <SolidColorBrush x:Key="RaisedPanelBrush" Color="#1D2B36" />
+    <SolidColorBrush x:Key="BorderBrush" Color="#2A3A46" />
+    <SolidColorBrush x:Key="TextBrush" Color="#E8EEF2" />
+    <SolidColorBrush x:Key="MutedBrush" Color="#A4B2BC" />
+    <SolidColorBrush x:Key="QuietBrush" Color="#7E8F9B" />
+    <SolidColorBrush x:Key="AccentBrush" Color="#69D4A1" />
+    <SolidColorBrush x:Key="FocusBrush" Color="#B6F1D2" />
+    <SolidColorBrush x:Key="WarningBrush" Color="#F0C27A" />
+    <SolidColorBrush x:Key="ErrorBrush" Color="#E27878" />
+
+    <Style x:Key="FocusOutline" TargetType="{x:Type Control}">
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate>
+            <Rectangle Margin="2" RadiusX="6" RadiusY="6"
+                       Stroke="{StaticResource FocusBrush}" StrokeThickness="2" />
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="NavItem" TargetType="ListBoxItem">
+      <Setter Property="Foreground" Value="{StaticResource MutedBrush}" />
+      <Setter Property="Padding" Value="14,11" />
+      <Setter Property="Margin" Value="0,2" />
+      <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+      <Setter Property="FocusVisualStyle" Value="{StaticResource FocusOutline}" />
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ListBoxItem">
+            <Border x:Name="Surface" Padding="{TemplateBinding Padding}" CornerRadius="8" Background="Transparent">
+              <ContentPresenter VerticalAlignment="Center" />
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="Surface" Property="Background" Value="#1A2934" />
+                <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+              </Trigger>
+              <Trigger Property="IsSelected" Value="True">
+                <Setter TargetName="Surface" Property="Background" Value="#21333F" />
+                <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+                <Setter Property="FontWeight" Value="SemiBold" />
+              </Trigger>
+              <Trigger Property="IsKeyboardFocused" Value="True">
+                <Setter TargetName="Surface" Property="BorderBrush" Value="{StaticResource FocusBrush}" />
+                <Setter TargetName="Surface" Property="BorderThickness" Value="1" />
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter Property="Foreground" Value="{StaticResource QuietBrush}" />
+                <Setter Property="Opacity" Value="0.72" />
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="ModeItem" TargetType="ListBoxItem" BasedOn="{StaticResource NavItem}">
+      <Setter Property="Margin" Value="0,4" />
+      <Setter Property="Padding" Value="16,14" />
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ListBoxItem">
+            <Border x:Name="Surface" Padding="{TemplateBinding Padding}" CornerRadius="9"
+                    Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1">
+              <ContentPresenter VerticalAlignment="Center" />
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="Surface" Property="Background" Value="{StaticResource RaisedPanelBrush}" />
+                <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+              </Trigger>
+              <Trigger Property="IsSelected" Value="True">
+                <Setter TargetName="Surface" Property="Background" Value="#1D302F" />
+                <Setter TargetName="Surface" Property="BorderBrush" Value="#4A9B79" />
+                <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+              </Trigger>
+              <Trigger Property="IsKeyboardFocused" Value="True">
+                <Setter TargetName="Surface" Property="BorderBrush" Value="{StaticResource FocusBrush}" />
+                <Setter TargetName="Surface" Property="BorderThickness" Value="2" />
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter Property="Foreground" Value="{StaticResource QuietBrush}" />
+                <Setter Property="Opacity" Value="0.7" />
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="FormTextBox" TargetType="TextBox">
+      <Setter Property="Background" Value="#111D27" />
+      <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+      <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
+      <Setter Property="CaretBrush" Value="{StaticResource AccentBrush}" />
+      <Setter Property="Padding" Value="9,7" />
+      <Setter Property="FocusVisualStyle" Value="{StaticResource FocusOutline}" />
+      <Setter Property="MinHeight" Value="36" />
+    </Style>
+
+    <Style x:Key="FormComboBoxItem" TargetType="ComboBoxItem">
+      <Setter Property="Background" Value="{StaticResource PanelBrush}" />
+      <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+      <Setter Property="Padding" Value="9,7" />
+      <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ComboBoxItem">
+            <Border x:Name="Surface" Background="{TemplateBinding Background}"
+                    Padding="{TemplateBinding Padding}">
+              <ContentPresenter />
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsHighlighted" Value="True">
+                <Setter TargetName="Surface" Property="Background" Value="#21333F" />
+              </Trigger>
+              <Trigger Property="IsSelected" Value="True">
+                <Setter TargetName="Surface" Property="Background" Value="#1D302F" />
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter Property="Foreground" Value="{StaticResource QuietBrush}" />
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="FormComboBox" TargetType="ComboBox">
+      <Setter Property="Background" Value="#111D27" />
+      <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+      <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
+      <Setter Property="ItemContainerStyle" Value="{StaticResource FormComboBoxItem}" />
+      <Setter Property="Padding" Value="8,5" />
+      <Setter Property="MinHeight" Value="36" />
+      <Setter Property="FocusVisualStyle" Value="{StaticResource FocusOutline}" />
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ComboBox">
+            <Grid SnapsToDevicePixels="True">
+              <Border x:Name="ComboSurface" Background="{TemplateBinding Background}"
+                      BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1" CornerRadius="4" />
+              <ToggleButton Grid.Column="2" Focusable="False" ClickMode="Press"
+                            IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}"
+                            Background="Transparent" BorderThickness="0" HorizontalAlignment="Right" Width="32">
+                <Path Data="M 0 0 L 4 4 L 8 0" Stroke="{StaticResource MutedBrush}"
+                      StrokeThickness="1.5" HorizontalAlignment="Center" VerticalAlignment="Center" />
+              </ToggleButton>
+              <ContentPresenter Margin="9,3,32,3" IsHitTestVisible="False"
+                                Content="{TemplateBinding SelectionBoxItem}"
+                                ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
+                                ContentTemplateSelector="{TemplateBinding ItemTemplateSelector}"
+                                VerticalAlignment="Center" HorizontalAlignment="Left" />
+              <Popup x:Name="Popup" Placement="Bottom" AllowsTransparency="True" Focusable="False"
+                     IsOpen="{TemplateBinding IsDropDownOpen}" PopupAnimation="Fade">
+                <Border Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}"
+                        BorderThickness="1" MaxHeight="260" MinWidth="{Binding ActualWidth, RelativeSource={RelativeSource TemplatedParent}}">
+                  <ScrollViewer CanContentScroll="True" SnapsToDevicePixels="True">
+                    <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained" />
+                  </ScrollViewer>
+                </Border>
+              </Popup>
+            </Grid>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsKeyboardFocusWithin" Value="True">
+                <Setter TargetName="ComboSurface" Property="BorderBrush" Value="{StaticResource FocusBrush}" />
+                <Setter TargetName="ComboSurface" Property="BorderThickness" Value="2" />
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter TargetName="ComboSurface" Property="Opacity" Value="0.65" />
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="PrimaryAction" TargetType="Button">
+      <Setter Property="Background" Value="{StaticResource AccentBrush}" />
+      <Setter Property="Foreground" Value="#101820" />
+      <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+      <Setter Property="Padding" Value="16,9" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="MinHeight" Value="38" />
+      <Setter Property="FocusVisualStyle" Value="{StaticResource FocusOutline}" />
+    </Style>
+
+    <Style x:Key="SecondaryAction" TargetType="Button">
+      <Setter Property="Background" Value="{StaticResource RaisedPanelBrush}" />
+      <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+      <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
+      <Setter Property="Padding" Value="12,8" />
+      <Setter Property="MinHeight" Value="36" />
+      <Setter Property="FocusVisualStyle" Value="{StaticResource FocusOutline}" />
+    </Style>
+
+    <Style x:Key="AssetRowItem" TargetType="ListBoxItem">
+      <Setter Property="Padding" Value="2" />
+      <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+      <Setter Property="FocusVisualStyle" Value="{StaticResource FocusOutline}" />
+    </Style>
+
+  </Application.Resources>
+</Application>

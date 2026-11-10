@@ -1,0 +1,511 @@
+<Window x:Class="TrueNorth.TradeFlow.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:TrueNorth.TradeFlow"
+        xmlns:account="clr-namespace:TrueNorth.TradeFlow.Account"
+        Title="TrueNorth TradeFlow" Width="1040" Height="720" MinWidth="760" MinHeight="560"
+        WindowStartupLocation="CenterScreen" Background="{StaticResource CanvasBrush}"
+        Foreground="{StaticResource TextBrush}" FontFamily="Segoe UI" FontSize="14"
+        UseLayoutRounding="True" SnapsToDevicePixels="True"
+        Closing="Window_Closing" StateChanged="Window_StateChanged">
+  <Window.Resources>
+    <Style x:Key="AiTestSecondaryAction" TargetType="Button" BasedOn="{StaticResource SecondaryAction}">
+      <Style.Triggers>
+        <Trigger Property="IsEnabled" Value="False">
+          <Setter Property="Background" Value="{StaticResource PanelBrush}" />
+          <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
+          <Setter Property="Foreground" Value="{StaticResource QuietBrush}" />
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+  </Window.Resources>
+  <Grid>
+    <Grid.ColumnDefinitions>
+      <ColumnDefinition Width="228" />
+      <ColumnDefinition Width="*" />
+    </Grid.ColumnDefinitions>
+
+    <Border Grid.Column="0" Background="{StaticResource RailBrush}"
+            BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,1,0">
+      <Grid Margin="18,22,18,16">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="28" />
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="*" />
+          <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+          <Border Width="38" Height="38" CornerRadius="11" Background="#214438" Margin="0,0,11,0">
+            <TextBlock Text="TN" Foreground="{StaticResource AccentBrush}" FontSize="13"
+                       FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center" />
+          </Border>
+          <StackPanel VerticalAlignment="Center">
+            <TextBlock Text="TrueNorth" FontSize="16" FontWeight="SemiBold" />
+            <TextBlock Text="TRADEFLOW" FontSize="10" Foreground="{StaticResource QuietBrush}" />
+          </StackPanel>
+        </StackPanel>
+
+        <TextBlock Grid.Row="2" Text="РАБОЧАЯ ОБЛАСТЬ" FontSize="10" FontWeight="SemiBold"
+                   Foreground="{StaticResource QuietBrush}" Margin="8,0,0,9" />
+
+        <ListBox x:Name="NavigationList" Grid.Row="3" SelectionMode="Single"
+                 SelectionChanged="Navigation_SelectionChanged" BorderThickness="0" Background="Transparent"
+                 ItemContainerStyle="{StaticResource NavItem}" AutomationProperties.Name="Разделы приложения"
+                 KeyboardNavigation.DirectionalNavigation="Contained" Focusable="True">
+          <ListBoxItem Content="Обзор" AutomationProperties.Name="Обзор" />
+          <ListBoxItem Content="Настройки" AutomationProperties.Name="Настройки" />
+          <ListBoxItem Content="Симуляция" AutomationProperties.Name="Симуляция" />
+          <ListBoxItem Content="AI тест" AutomationProperties.Name="AI тест, только синтетические данные" />
+          <ListBoxItem Content="История" AutomationProperties.Name="История закрытых сделок" />
+        </ListBox>
+
+        <StackPanel Grid.Row="4" Margin="8,0,0,4">
+          <Border Height="1" Background="{StaticResource BorderBrush}" Margin="0,0,0,14" />
+          <TextBlock Text="Локальная оболочка" Foreground="{StaticResource MutedBrush}" FontSize="12" />
+          <TextBlock x:Name="VersionText" Margin="0,4,0,0" Foreground="{StaticResource QuietBrush}" FontSize="11" />
+        </StackPanel>
+      </Grid>
+    </Border>
+
+    <Grid Grid.Column="1">
+      <Grid.RowDefinitions>
+        <RowDefinition Height="60" />
+        <RowDefinition Height="*" />
+      </Grid.RowDefinitions>
+
+      <Border Grid.Row="0" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1">
+        <Grid Margin="30,0,30,0">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*" />
+            <ColumnDefinition Width="Auto" />
+          </Grid.ColumnDefinitions>
+          <TextBlock x:Name="CurrentModeText" VerticalAlignment="Center" Foreground="{StaticResource MutedBrush}"
+                     TextTrimming="CharacterEllipsis" AutomationProperties.Name="Выбранный режим" />
+          <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+            <Border x:Name="AccountTestDataBadge" BorderBrush="#4A9B79" BorderThickness="1"
+                    CornerRadius="20" Padding="11,5" Background="#162A26" Margin="0,0,8,0"
+                    Visibility="Collapsed" AutomationProperties.Name="Тестовые данные локального примера">
+              <TextBlock Text="ТЕСТОВЫЕ ДАННЫЕ" FontSize="9" FontWeight="SemiBold"
+                         Foreground="{StaticResource AccentBrush}" />
+            </Border>
+            <Border x:Name="OperatingStatusBadge" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
+                    CornerRadius="20" Padding="11,5" Background="#15212A">
+              <TextBlock Text="ТОРГОВЫЕ ФУНКЦИИ НЕ ЗАПУЩЕНЫ" FontSize="9" FontWeight="SemiBold"
+                         Foreground="{StaticResource MutedBrush}" />
+            </Border>
+            <Border x:Name="SimulationStatusBadge" BorderBrush="#4A9B79" BorderThickness="1"
+                    CornerRadius="20" Padding="11,5" VerticalAlignment="Center" Background="#162A26"
+                    Visibility="Collapsed" AutomationProperties.Name="Симуляция, учебные данные">
+              <TextBlock x:Name="SimulationStatusText" Text="СИМУЛЯЦИЯ · УЧЕБНЫЕ ДАННЫЕ" FontSize="9" FontWeight="SemiBold"
+                         Foreground="{StaticResource AccentBrush}" />
+            </Border>
+          </StackPanel>
+        </Grid>
+      </Border>
+
+      <ScrollViewer x:Name="MainScrollViewer" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                    KeyboardNavigation.TabNavigation="Continue">
+        <Grid>
+          <StackPanel x:Name="OverviewPage" Margin="30,26,30,34">
+            <TextBlock Text="ОБЗОР" Foreground="{StaticResource AccentBrush}" FontSize="11"
+                       FontWeight="SemiBold" Margin="0,0,0,7" />
+            <TextBlock Text="Состояние приложения" FontSize="27" FontWeight="SemiBold" />
+            <TextBlock Text="Настройки сохраняются локально. Торговые действия на этом этапе не выполняются." Foreground="{StaticResource MutedBrush}"
+                       Margin="0,7,0,23" TextWrapping="Wrap" />
+
+            <Border x:Name="TrueNorthSessionCard" Background="{StaticResource PanelBrush}"
+                    BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="10"
+                    Padding="20" Margin="0,0,0,18">
+              <StackPanel>
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                  <Ellipse x:Name="TrueNorthSessionIndicator" Width="9" Height="9"
+                           Fill="{StaticResource QuietBrush}" Margin="0,0,10,0" />
+                  <TextBlock x:Name="TrueNorthSessionStateText" Text="Статус входа не проверен"
+                             FontSize="16" FontWeight="SemiBold"
+                             AutomationProperties.LiveSetting="Polite" />
+                </StackPanel>
+                <TextBlock x:Name="TrueNorthSessionDetailsText"
+                           Text="Вход откроется в отдельном окне Microsoft Edge. После ручного входа проверьте сессию здесь."
+                           Foreground="{StaticResource MutedBrush}" Margin="19,8,0,0" TextWrapping="Wrap" />
+                <StackPanel Orientation="Horizontal" Margin="19,14,0,0">
+                  <Button x:Name="OpenTrueNorthButton" Style="{StaticResource PrimaryAction}" Content="Войти"
+                          Click="OpenTrueNorth_Click" AutomationProperties.Name="Войти в TrueNorth в отдельном окне Microsoft Edge"
+                          Focusable="True" IsTabStop="True" />
+                  <Button x:Name="CheckTrueNorthSessionButton" Style="{StaticResource SecondaryAction}"
+                          Content="Проверить сессию" Margin="10,0,0,0" Click="CheckTrueNorthSession_Click"
+                          AutomationProperties.Name="Проверить сессию TrueNorth" Focusable="True" IsTabStop="True" />
+                </StackPanel>
+              </StackPanel>
+            </Border>
+
+            <account:AccountDashboardView x:Name="AccountDashboardPage" />
+
+            <Border Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}"
+                    BorderThickness="1" CornerRadius="10" Padding="20" Margin="0,0,0,22">
+              <StackPanel>
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                  <Ellipse Width="9" Height="9" Fill="{StaticResource QuietBrush}" Margin="0,0,10,0" />
+                  <TextBlock Text="Мониторинг не запущен" FontSize="16" FontWeight="SemiBold" />
+                </StackPanel>
+                <TextBlock Text="Чтение реального счёта пока не подключено. Торговые действия не выполняются."
+                           Foreground="{StaticResource MutedBrush}" Margin="19,8,0,0" TextWrapping="Wrap" />
+                <TextBlock x:Name="OperatingIntentText" Foreground="{StaticResource MutedBrush}"
+                           Margin="19,8,0,0" TextWrapping="Wrap" />
+              </StackPanel>
+            </Border>
+
+            <TextBlock Text="Режим работы" FontSize="17" FontWeight="SemiBold" />
+            <TextBlock Text="Выбранный режим сохраняется; торговые функции пока не запускаются." Foreground="{StaticResource MutedBrush}"
+                       Margin="0,5,0,10" TextWrapping="Wrap" />
+            <ListBox x:Name="ModeList" SelectionMode="Single" BorderThickness="0"
+                     Background="Transparent" ItemContainerStyle="{StaticResource ModeItem}"
+                     SelectionChanged="Mode_SelectionChanged" AutomationProperties.Name="Режим работы"
+                     KeyboardNavigation.DirectionalNavigation="Contained" Focusable="True">
+              <ListBoxItem Tag="Test" AutomationProperties.Name="Test" AutomationProperties.HelpText="Доступен локальный тест на синтетических данных">
+                <StackPanel>
+                  <TextBlock Text="Test" FontSize="15" FontWeight="SemiBold" />
+                  <TextBlock Text="Локальный синтетический AI-анализ" Foreground="{StaticResource MutedBrush}"
+                             FontSize="12" Margin="0,4,0,0" TextWrapping="Wrap" />
+                </StackPanel>
+              </ListBoxItem>
+              <ListBoxItem Tag="TrueNorth AI setups" AutomationProperties.Name="TrueNorth AI setups"
+                           AutomationProperties.HelpText="Функции режима пока недоступны">
+                <StackPanel>
+                  <TextBlock Text="TrueNorth AI setups" FontSize="15" FontWeight="SemiBold" />
+                  <TextBlock Text="Подготовка и мониторинг недоступны" Foreground="{StaticResource MutedBrush}"
+                             FontSize="12" Margin="0,4,0,0" TextWrapping="Wrap" />
+                </StackPanel>
+              </ListBoxItem>
+              <ListBoxItem IsEnabled="False" Tag="Arbitrage" AutomationProperties.Name="Arbitrage, недоступно">
+                <StackPanel>
+                  <TextBlock Text="Arbitrage" FontSize="15" FontWeight="SemiBold" />
+                  <TextBlock Text="Недоступно" Foreground="{StaticResource QuietBrush}"
+                             FontSize="12" Margin="0,4,0,0" />
+                </StackPanel>
+              </ListBoxItem>
+            </ListBox>
+            <TextBlock x:Name="OverviewModeStatusText" Foreground="{StaticResource WarningBrush}"
+                       Margin="0,8,0,0" TextWrapping="Wrap" Visibility="Collapsed"
+                       AutomationProperties.LiveSetting="Polite" />
+          </StackPanel>
+
+          <StackPanel x:Name="SettingsPage" Visibility="Collapsed" Margin="30,26,30,34">
+            <TextBlock Text="НАСТРОЙКИ" Foreground="{StaticResource AccentBrush}" FontSize="11"
+                       FontWeight="SemiBold" Margin="0,0,0,7" />
+            <TextBlock Text="Параметры работы" FontSize="27" FontWeight="SemiBold" />
+            <TextBlock Text="Настройки влияют на будущую работу. Текущие позиции и заявки они не меняют." Foreground="{StaticResource MutedBrush}"
+                       Margin="0,7,0,23" TextWrapping="Wrap" />
+
+            <Border Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}"
+                    BorderThickness="1" CornerRadius="10" Padding="20" Margin="0,0,0,16">
+              <StackPanel>
+                <TextBlock Text="Активы и параметры входа" FontSize="16" FontWeight="SemiBold" />
+                <TextBlock Text="Порядок активов задаёт очередность рассмотрения. Пустые торговые поля можно заполнить позже."
+                           Foreground="{StaticResource MutedBrush}" Margin="0,6,0,14" TextWrapping="Wrap" />
+
+                <Grid>
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="1.2*" />
+                    <ColumnDefinition Width="20" />
+                    <ColumnDefinition Width="1*" />
+                  </Grid.ColumnDefinitions>
+                  <StackPanel Grid.Column="0">
+                    <DockPanel Margin="0,0,0,8">
+                      <Button x:Name="AddAssetButton" DockPanel.Dock="Right" Style="{StaticResource SecondaryAction}"
+                              Content="_Добавить актив" Click="AddAsset_Click"
+                              AutomationProperties.Name="Добавить актив" />
+                      <TextBlock Text="Активы" VerticalAlignment="Center" FontWeight="SemiBold" />
+                    </DockPanel>
+                    <ListBox x:Name="AssetsList" Height="142"
+                             Background="#111D27" Foreground="{StaticResource TextBrush}"
+                             BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
+                             ItemContainerStyle="{StaticResource AssetRowItem}"
+                             Focusable="True" IsTabStop="True" FocusVisualStyle="{StaticResource FocusOutline}"
+                             KeyboardNavigation.TabNavigation="Continue" AutomationProperties.Name="Упорядоченный список активов">
+                      <ListBox.ItemTemplate>
+                        <DataTemplate>
+                          <Grid Margin="2">
+                            <Grid.ColumnDefinitions>
+                              <ColumnDefinition Width="34" />
+                              <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="{Binding Position}" Foreground="{StaticResource QuietBrush}"
+                                       VerticalAlignment="Center" HorizontalAlignment="Center" />
+                            <TextBox Grid.Column="1" Style="{StaticResource FormTextBox}"
+                                     Text="{Binding Text, UpdateSourceTrigger=PropertyChanged}"
+                                     AutomationProperties.Name="Символ актива" />
+                          </Grid>
+                        </DataTemplate>
+                      </ListBox.ItemTemplate>
+                    </ListBox>
+                    <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                      <Button x:Name="AssetUpButton" Style="{StaticResource SecondaryAction}" Content="Выше"
+                              Click="MoveAssetUp_Click" AutomationProperties.Name="Переместить актив выше" />
+                      <Button x:Name="AssetDownButton" Style="{StaticResource SecondaryAction}" Content="Ниже"
+                              Margin="8,0,0,0" Click="MoveAssetDown_Click" AutomationProperties.Name="Переместить актив ниже" />
+                      <Button x:Name="RemoveAssetButton" Style="{StaticResource SecondaryAction}" Content="Удалить"
+                              Margin="8,0,0,0" Click="RemoveAsset_Click" AutomationProperties.Name="Удалить актив" />
+                    </StackPanel>
+                    <TextBlock x:Name="AssetsErrorText" Foreground="{StaticResource WarningBrush}" Margin="0,7,0,0"
+                               TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
+                  </StackPanel>
+
+                  <StackPanel Grid.Column="2">
+                    <TextBlock Text="Тип входа" FontWeight="SemiBold" Margin="0,0,0,6" />
+                    <ComboBox x:Name="EntryTypeComboBox" Style="{StaticResource FormComboBox}"
+                              AutomationProperties.Name="Тип входа">
+                      <ComboBoxItem Content="Выберите Market или Limit" Tag="" IsEnabled="False" />
+                      <ComboBoxItem Content="Market" Tag="Market" />
+                      <ComboBoxItem Content="Limit" Tag="Limit" />
+                    </ComboBox>
+                    <TextBlock x:Name="EntryTypeErrorText" Foreground="{StaticResource WarningBrush}" Margin="0,5,0,8"
+                               TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
+
+                    <TextBlock Text="Баланс для маржи" FontWeight="SemiBold" Margin="0,2,0,6" />
+                    <DockPanel>
+                      <TextBlock DockPanel.Dock="Right" Text="%" Foreground="{StaticResource MutedBrush}"
+                                 VerticalAlignment="Center" Margin="9,0,0,0" />
+                      <TextBox x:Name="MarginPercentTextBox" Style="{StaticResource FormTextBox}"
+                               AutomationProperties.Name="Процент баланса для маржи" />
+                    </DockPanel>
+                    <TextBlock x:Name="MarginPercentErrorText" Foreground="{StaticResource WarningBrush}" Margin="0,5,0,8"
+                               TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
+
+                    <TextBlock Text="Плечо" FontWeight="SemiBold" Margin="0,2,0,6" />
+                    <DockPanel>
+                      <TextBlock DockPanel.Dock="Right" Text="×" Foreground="{StaticResource MutedBrush}"
+                                 VerticalAlignment="Center" Margin="9,0,0,0" />
+                      <TextBox x:Name="LeverageTextBox" Style="{StaticResource FormTextBox}"
+                               AutomationProperties.Name="Плечо" />
+                    </DockPanel>
+                    <TextBlock x:Name="LeverageErrorText" Foreground="{StaticResource WarningBrush}" Margin="0,5,0,0"
+                               TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
+                  </StackPanel>
+                </Grid>
+              </StackPanel>
+            </Border>
+
+            <Border Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}"
+                    BorderThickness="1" CornerRadius="10" Padding="20" Margin="0,0,0,16">
+              <StackPanel>
+                <TextBlock Text="Мониторинг и запросы" FontSize="16" FontWeight="SemiBold" />
+                <TextBlock Text="Интервалы заданы отдельно для наблюдения за позициями, заявками и запросами к AI."
+                           Foreground="{StaticResource MutedBrush}" Margin="0,6,0,14" TextWrapping="Wrap" />
+                <TextBlock Text="Мониторинг" FontWeight="SemiBold" Margin="0,0,0,8" />
+                <Grid>
+                  <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="18" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                  <StackPanel>
+                    <TextBlock Text="Полностью открытые позиции" Foreground="{StaticResource MutedBrush}" Margin="0,0,0,5" />
+                    <DockPanel><TextBlock DockPanel.Dock="Right" Text="мин" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center" Margin="9,0,0,0" /><TextBox x:Name="PositionCheckMinutesTextBox" Style="{StaticResource FormTextBox}" AutomationProperties.Name="Проверка открытых позиций, минуты" /></DockPanel>
+                    <TextBlock x:Name="PositionCheckMinutesErrorText" Foreground="{StaticResource WarningBrush}" Margin="0,5,0,0" TextWrapping="Wrap" />
+                  </StackPanel>
+                  <StackPanel Grid.Column="2">
+                    <TextBlock Text="Limit-заявки и связанные позиции" Foreground="{StaticResource MutedBrush}" Margin="0,0,0,5" />
+                    <DockPanel><TextBlock DockPanel.Dock="Right" Text="мин" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center" Margin="9,0,0,0" /><TextBox x:Name="LimitOrderCheckMinutesTextBox" Style="{StaticResource FormTextBox}" AutomationProperties.Name="Проверка Limit-заявок, минуты" /></DockPanel>
+                    <TextBlock x:Name="LimitOrderCheckMinutesErrorText" Foreground="{StaticResource WarningBrush}" Margin="0,5,0,0" TextWrapping="Wrap" />
+                  </StackPanel>
+                </Grid>
+                <Grid Margin="0,14,0,0">
+                  <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="18" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                  <StackPanel>
+                    <TextBlock Text="Отмена остатка после первого исполнения" Foreground="{StaticResource MutedBrush}" Margin="0,0,0,5" TextWrapping="Wrap" />
+                    <DockPanel><TextBlock DockPanel.Dock="Right" Text="мин" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center" Margin="9,0,0,0" /><TextBox x:Name="PartialFillCancelMinutesTextBox" Style="{StaticResource FormTextBox}" AutomationProperties.Name="Срок отмены остатка Limit-заявки, минуты" /></DockPanel>
+                    <TextBlock x:Name="PartialFillCancelMinutesErrorText" Foreground="{StaticResource WarningBrush}" Margin="0,5,0,0" TextWrapping="Wrap" />
+                  </StackPanel>
+                  <StackPanel Grid.Column="2">
+                    <TextBlock Text="Повторный поиск после отсутствия сетапа" Foreground="{StaticResource MutedBrush}" Margin="0,0,0,5" TextWrapping="Wrap" />
+                    <DockPanel><TextBlock DockPanel.Dock="Right" Text="мин" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center" Margin="9,0,0,0" /><TextBox x:Name="NewSetupRetryMinutesTextBox" Style="{StaticResource FormTextBox}" AutomationProperties.Name="Повторный поиск после отсутствия сетапа, минуты" /></DockPanel>
+                    <TextBlock x:Name="NewSetupRetryMinutesErrorText" Foreground="{StaticResource WarningBrush}" Margin="0,5,0,0" TextWrapping="Wrap" />
+                  </StackPanel>
+                </Grid>
+                <StackPanel Margin="0,14,0,0">
+                  <TextBlock Text="Переоценка ожидающей Limit-заявки" Foreground="{StaticResource MutedBrush}" Margin="0,0,0,5" />
+                  <DockPanel><TextBlock DockPanel.Dock="Right" Text="мин" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center" Margin="9,0,0,0" /><TextBox x:Name="LimitReassessmentMinutesTextBox" Style="{StaticResource FormTextBox}" Width="180" HorizontalAlignment="Left" AutomationProperties.Name="Переоценка Limit-заявки, минуты" /></DockPanel>
+                  <TextBlock x:Name="LimitReassessmentMinutesErrorText" Foreground="{StaticResource WarningBrush}" Margin="0,5,0,0" TextWrapping="Wrap" />
+                </StackPanel>
+              </StackPanel>
+            </Border>
+
+            <Border Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}"
+                    BorderThickness="1" CornerRadius="10" Padding="20" Margin="0,0,0,16">
+              <StackPanel>
+                <TextBlock Text="Восстановление и аварийное закрытие" FontSize="16" FontWeight="SemiBold" />
+                <TextBlock Text="Повторы чтения и закрытия настраиваются независимо. Значения относятся к дополнительным попыткам."
+                           Foreground="{StaticResource MutedBrush}" Margin="0,6,0,14" TextWrapping="Wrap" />
+                <TextBlock Text="Повтор чтения данных" FontWeight="SemiBold" Margin="0,0,0,8" />
+                <Grid>
+                  <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="18" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                  <StackPanel>
+                    <TextBlock Text="Дополнительные чтения" Foreground="{StaticResource MutedBrush}" Margin="0,0,0,5" />
+                    <TextBox x:Name="ReadRetryCountTextBox" Style="{StaticResource FormTextBox}" AutomationProperties.Name="Дополнительные чтения" />
+                    <TextBlock x:Name="ReadRetryCountErrorText" Foreground="{StaticResource WarningBrush}" Margin="0,5,0,0" TextWrapping="Wrap" />
+                  </StackPanel>
+                  <StackPanel Grid.Column="2">
+                    <TextBlock Text="Пауза между попытками" Foreground="{StaticResource MutedBrush}" Margin="0,0,0,5" />
+                    <DockPanel><TextBlock DockPanel.Dock="Right" Text="сек" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center" Margin="9,0,0,0" /><TextBox x:Name="ReadRetryDelaySecondsTextBox" Style="{StaticResource FormTextBox}" AutomationProperties.Name="Пауза между чтениями, секунды" /></DockPanel>
+                    <TextBlock x:Name="ReadRetryDelaySecondsErrorText" Foreground="{StaticResource WarningBrush}" Margin="0,5,0,0" TextWrapping="Wrap" />
+                  </StackPanel>
+                </Grid>
+                <StackPanel Margin="0,12,0,0">
+                  <TextBlock Text="Проверка после оповещения" Foreground="{StaticResource MutedBrush}" Margin="0,0,0,5" />
+                  <DockPanel><TextBlock DockPanel.Dock="Right" Text="сек" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center" Margin="9,0,0,0" /><TextBox x:Name="RecoveryCheckSecondsTextBox" Style="{StaticResource FormTextBox}" Width="180" HorizontalAlignment="Left" AutomationProperties.Name="Повторная проверка после оповещения, секунды" /></DockPanel>
+                  <TextBlock x:Name="RecoveryCheckSecondsErrorText" Foreground="{StaticResource WarningBrush}" Margin="0,5,0,0" TextWrapping="Wrap" />
+                </StackPanel>
+
+                <TextBlock Text="Аварийное закрытие" FontWeight="SemiBold" Margin="0,16,0,8" />
+                <Grid>
+                  <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="18" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                  <StackPanel>
+                    <TextBlock Text="Дополнительные попытки" Foreground="{StaticResource MutedBrush}" Margin="0,0,0,5" />
+                    <TextBox x:Name="EmergencyCloseRetryCountTextBox" Style="{StaticResource FormTextBox}" AutomationProperties.Name="Дополнительные попытки закрытия" />
+                    <TextBlock x:Name="EmergencyCloseRetryCountErrorText" Foreground="{StaticResource WarningBrush}" Margin="0,5,0,0" TextWrapping="Wrap" />
+                  </StackPanel>
+                  <StackPanel Grid.Column="2">
+                    <TextBlock Text="Пауза между попытками" Foreground="{StaticResource MutedBrush}" Margin="0,0,0,5" />
+                    <DockPanel><TextBlock DockPanel.Dock="Right" Text="сек" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center" Margin="9,0,0,0" /><TextBox x:Name="EmergencyCloseRetryDelaySecondsTextBox" Style="{StaticResource FormTextBox}" AutomationProperties.Name="Пауза между попытками закрытия, секунды" /></DockPanel>
+                    <TextBlock x:Name="EmergencyCloseRetryDelaySecondsErrorText" Foreground="{StaticResource WarningBrush}" Margin="0,5,0,0" TextWrapping="Wrap" />
+                  </StackPanel>
+                </Grid>
+                <StackPanel Margin="0,12,0,0">
+                  <TextBlock Text="Интервал после оповещения" Foreground="{StaticResource MutedBrush}" Margin="0,0,0,5" />
+                  <DockPanel><TextBlock DockPanel.Dock="Right" Text="сек" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center" Margin="9,0,0,0" /><TextBox x:Name="EmergencyCloseAfterNoticeSecondsTextBox" Style="{StaticResource FormTextBox}" Width="180" HorizontalAlignment="Left" AutomationProperties.Name="Интервал после оповещения, секунды" /></DockPanel>
+                  <TextBlock x:Name="EmergencyCloseAfterNoticeSecondsErrorText" Foreground="{StaticResource WarningBrush}" Margin="0,5,0,0" TextWrapping="Wrap" />
+                </StackPanel>
+              </StackPanel>
+            </Border>
+
+            <Border Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}"
+                    BorderThickness="1" CornerRadius="10" Padding="20" Margin="0,0,0,16">
+              <StackPanel>
+                <TextBlock Text="Уведомления" FontSize="16" FontWeight="SemiBold" />
+                <TextBlock Text="Здесь сохраняются предпочтения. Доставка уведомлений появится на следующем этапе."
+                           Foreground="{StaticResource MutedBrush}" Margin="0,6,0,12" TextWrapping="Wrap" />
+                <CheckBox x:Name="NotificationsEnabledCheckBox" Content="Включить уведомления"
+                          FontWeight="SemiBold" AutomationProperties.Name="Включить уведомления" />
+                <WrapPanel Margin="22,8,0,0">
+                  <CheckBox x:Name="OpeningNotificationsCheckBox" Content="Открытие" Margin="0,0,18,8" AutomationProperties.Name="Уведомления об открытии" />
+                  <CheckBox x:Name="ClosingNotificationsCheckBox" Content="Закрытие" Margin="0,0,18,8" AutomationProperties.Name="Уведомления о закрытии" />
+                  <CheckBox x:Name="OrderChangeNotificationsCheckBox" Content="Отмена или замена заявки" Margin="0,0,18,8" AutomationProperties.Name="Уведомления об отмене или замене заявки" />
+                  <CheckBox x:Name="ErrorNotificationsCheckBox" Content="Ошибки" Margin="0,0,18,8" AutomationProperties.Name="Уведомления об ошибках" />
+                  <CheckBox x:Name="RecoveryNotificationsCheckBox" Content="Восстановление" Margin="0,0,18,8" AutomationProperties.Name="Уведомления о восстановлении" />
+                </WrapPanel>
+                <CheckBox x:Name="FailureRemindersEnabledCheckBox" Content="Напоминать о продолжающемся сбое"
+                          Margin="0,6,0,0" AutomationProperties.Name="Напоминать о продолжающемся сбое" />
+                <StackPanel Margin="22,8,0,0">
+                  <TextBlock Text="Интервал напоминаний" Foreground="{StaticResource MutedBrush}" Margin="0,0,0,5" />
+                  <DockPanel><TextBlock DockPanel.Dock="Right" Text="мин" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center" Margin="9,0,0,0" /><TextBox x:Name="FailureReminderMinutesTextBox" Style="{StaticResource FormTextBox}" Width="180" HorizontalAlignment="Left" AutomationProperties.Name="Интервал напоминаний, минуты" /></DockPanel>
+                  <TextBlock x:Name="FailureReminderMinutesErrorText" Foreground="{StaticResource WarningBrush}" Margin="0,5,0,0" TextWrapping="Wrap" />
+                </StackPanel>
+              </StackPanel>
+            </Border>
+
+            <Border Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}"
+                    BorderThickness="1" CornerRadius="10" Padding="20" Margin="0,0,0,16">
+              <StackPanel>
+                <TextBlock Text="Приложение" FontSize="16" FontWeight="SemiBold" />
+                <CheckBox x:Name="PreventSleepCheckBox" Content="Предотвращать переход компьютера в сон"
+                          FontWeight="SemiBold" Margin="0,12,0,0"
+                          AutomationProperties.Name="Предотвращать переход компьютера в сон во время торговли или мониторинга" />
+                <TextBlock Text="Запрос к Windows включается только при активной работе. Экран может погаснуть, ручное выключение доступно."
+                           Foreground="{StaticResource MutedBrush}" Margin="25,8,0,0" TextWrapping="Wrap" />
+                <TextBlock x:Name="PowerStatusText" Foreground="{StaticResource MutedBrush}" Margin="25,10,0,0"
+                           TextWrapping="Wrap" AutomationProperties.Name="Состояние защиты от сна" />
+              </StackPanel>
+            </Border>
+
+            <TextBlock x:Name="SettingsStatusText" Foreground="{StaticResource MutedBrush}" Margin="0,0,0,10"
+                       TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+              <Button x:Name="SaveSettingsButton" Style="{StaticResource PrimaryAction}" Content="_Сохранить"
+                      Click="SaveSettings_Click" AutomationProperties.Name="Сохранить настройки" />
+              <Button x:Name="CancelSettingsButton" Style="{StaticResource SecondaryAction}"
+                      Content="_Отменить изменения" Margin="10,0,0,0" Click="CancelSettings_Click"
+                      AutomationProperties.Name="Отменить изменения" />
+              <Button x:Name="RecoverSettingsButton" Style="{StaticResource SecondaryAction}" Content="Восстановить копию"
+                      Margin="10,0,0,0" Click="RecoverSettings_Click" Visibility="Collapsed"
+                      AutomationProperties.Name="Восстановить последнюю исправную копию" />
+            </StackPanel>
+          </StackPanel>
+
+          <local:SimulationPage x:Name="SimulationContent" Visibility="Collapsed" />
+
+          <StackPanel x:Name="AiTestPage" Visibility="Collapsed" Margin="30,26,30,34">
+            <TextBlock Text="AI ТЕСТ" Foreground="{StaticResource AccentBrush}" FontSize="11"
+                       FontWeight="SemiBold" Margin="0,0,0,7" />
+            <TextBlock Text="Синтетический анализ" FontSize="27" FontWeight="SemiBold" />
+            <TextBlock Text="Проверка формата на синтетических данных; не торговое решение."
+                       Foreground="{StaticResource MutedBrush}" Margin="0,7,0,16" TextWrapping="Wrap" />
+
+            <Border Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}"
+                    BorderThickness="1" CornerRadius="10" Padding="18" Margin="0,0,0,16">
+              <StackPanel>
+                <TextBlock x:Name="AiTestRealRunUnavailableText"
+                           Text="Ответы для этого пакета созданы приложением. Реальные запросы станут доступны после проверки входа в TrueNorth."
+                           Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap"
+                           AutomationProperties.Name="Источник данных и доступность реального прогона" />
+                <TextBlock x:Name="AiTestDefaultsText" Foreground="{StaticResource QuietBrush}"
+                           Margin="0,5,0,0" FontSize="12" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
+
+                <Grid Margin="0,9,0,0">
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="1.35*" />
+                    <ColumnDefinition Width="14" />
+                    <ColumnDefinition Width="1*" />
+                  </Grid.ColumnDefinitions>
+                  <StackPanel>
+                    <TextBlock Text="Тикеры, через запятую" FontWeight="SemiBold" Margin="0,0,0,5" />
+                    <TextBox x:Name="AiTestAssetsTextBox" Style="{StaticResource FormTextBox}" MaxLength="200"
+                             TextChanged="AiTestInput_TextChanged"
+                             AutomationProperties.Name="Тикеры для синтетического AI-теста"
+                             AutomationProperties.HelpText="Только тикеры A-Z и цифры. Не вводите личные данные." />
+                  </StackPanel>
+                  <StackPanel Grid.Column="2">
+                    <TextBlock Text="Тип входа" FontWeight="SemiBold" Margin="0,0,0,5" />
+                    <ComboBox x:Name="AiTestEntryTypeComboBox" Style="{StaticResource FormComboBox}"
+                              AutomationProperties.Name="Тип входа для синтетического AI-теста">
+                      <ComboBoxItem Content="Market" Tag="Market" />
+                      <ComboBoxItem Content="Limit" Tag="Limit" />
+                    </ComboBox>
+                  </StackPanel>
+                </Grid>
+                <TextBlock x:Name="AiTestInputErrorText" Foreground="{StaticResource WarningBrush}"
+                           Margin="0,6,0,0" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
+
+                <WrapPanel Margin="0,14,0,0">
+                  <Button x:Name="StartAiTestButton" Style="{StaticResource PrimaryAction}" Content="_Запустить пакет"
+                          Click="StartAiTest_Click" AutomationProperties.Name="Запустить локальный синтетический пакет" />
+                  <Button x:Name="CancelAiTestButton" Style="{StaticResource AiTestSecondaryAction}" Content="_Отменить"
+                          Margin="8,0,0,0" Click="CancelAiTest_Click" IsEnabled="False"
+                          AutomationProperties.Name="Отменить активный синтетический пакет" />
+                  <Button x:Name="RetryAiReportButton" Style="{StaticResource AiTestSecondaryAction}"
+                          Content="_Повторить сохранение" Margin="8,0,0,0" Click="RetryAiReport_Click"
+                          Visibility="Collapsed" AutomationProperties.Name="Повторить сохранение отчёта" />
+                  <Button x:Name="OpenAiReportButton" Style="{StaticResource AiTestSecondaryAction}" Content="_Открыть отчёт"
+                          Margin="8,0,0,0" Click="OpenAiReport_Click" IsEnabled="False"
+                          AutomationProperties.Name="Открыть сохранённый отчёт синтетического теста" />
+                </WrapPanel>
+
+                <ProgressBar x:Name="AiTestProgressBar" Height="5" Margin="0,14,0,0" Minimum="0" Maximum="1"
+                             Value="0" Background="{StaticResource BorderBrush}" Foreground="{StaticResource AccentBrush}"
+                             BorderBrush="{StaticResource BorderBrush}" BorderThickness="0"
+                             AutomationProperties.Name="Ход синтетического пакета" />
+                <TextBlock x:Name="AiTestStatusText" Text="Пакет не запускался."
+                           Foreground="{StaticResource MutedBrush}" Margin="0,8,0,0" TextWrapping="Wrap"
+                           AutomationProperties.LiveSetting="Polite" />
+                <TextBlock x:Name="AiTestSummaryText" Foreground="{StaticResource MutedBrush}"
+                           Margin="0,6,0,0" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
+                <TextBlock x:Name="AiTestPathText" Foreground="{StaticResource QuietBrush}" FontSize="12"
+                           Margin="0,6,0,0" TextWrapping="Wrap" />
+              </StackPanel>
+            </Border>
+          </StackPanel>
+
+          <account:AccountHistoryView x:Name="AccountHistoryPage" Visibility="Collapsed"
+                                      Margin="30,26,30,34" />
+        </Grid>
+      </ScrollViewer>
+    </Grid>
+  </Grid>
+</Window>

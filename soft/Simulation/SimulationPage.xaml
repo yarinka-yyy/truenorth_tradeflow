@@ -1,0 +1,275 @@
+<UserControl x:Class="TrueNorth.TradeFlow.SimulationPage"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Focusable="False">
+  <UserControl.Resources>
+    <Style x:Key="SimulationSecondaryAction" TargetType="Button" BasedOn="{StaticResource SecondaryAction}">
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="Surface" Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1" CornerRadius="5">
+              <ContentPresenter Margin="{TemplateBinding Padding}"
+                                HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                                RecognizesAccessKey="True" />
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="Surface" Property="Background" Value="{StaticResource PanelBrush}" />
+              </Trigger>
+              <Trigger Property="IsPressed" Value="True">
+                <Setter TargetName="Surface" Property="Background" Value="{StaticResource RaisedPanelBrush}" />
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter TargetName="Surface" Property="Background" Value="#1A2730" />
+                <Setter TargetName="Surface" Property="BorderBrush" Value="{StaticResource BorderBrush}" />
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+      <Style.Triggers>
+        <Trigger Property="IsEnabled" Value="False">
+          <Setter Property="Background" Value="#1A2730" />
+          <Setter Property="Foreground" Value="{StaticResource QuietBrush}" />
+          <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+  </UserControl.Resources>
+  <StackPanel Margin="30,26,30,34">
+    <TextBlock Text="СИМУЛЯЦИЯ" Foreground="{StaticResource AccentBrush}" FontSize="11"
+               FontWeight="SemiBold" Margin="0,0,0,7" />
+    <TextBlock Text="Пройдите учебный сценарий" FontSize="27" FontWeight="SemiBold" />
+    <TextBlock Text="Вымышленные данные остаются внутри приложения. Сайт, счета, реальные заявки и внешние сообщения не затрагиваются."
+               Foreground="{StaticResource MutedBrush}" Margin="0,7,0,10" TextWrapping="Wrap" />
+
+    <Border Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}"
+            BorderThickness="1" CornerRadius="10" Padding="16" Margin="0,0,0,14">
+      <StackPanel>
+        <TextBlock Text="Сценарий" FontWeight="SemiBold" Margin="0,0,0,7" />
+        <ComboBox x:Name="ScenarioSelector" Style="{StaticResource FormComboBox}"
+                  SelectionChanged="ScenarioSelector_SelectionChanged"
+                  AutomationProperties.Name="Учебный сценарий"
+                  KeyboardNavigation.TabNavigation="Continue" />
+        <WrapPanel Margin="0,10,0,0">
+          <Button x:Name="StartButton" Content="_Начать" Style="{StaticResource PrimaryAction}"
+                  Click="Start_Click" Margin="0,0,8,0" AutomationProperties.Name="Начать симуляцию" />
+          <Button x:Name="NextButton" Content="_Следующий шаг" Style="{StaticResource SimulationSecondaryAction}"
+                  Click="Next_Click" Margin="0,0,8,0" AutomationProperties.Name="Следующий шаг симуляции" />
+          <Button x:Name="ResetButton" Content="_Сбросить" Style="{StaticResource SimulationSecondaryAction}"
+                  Click="Reset_Click" AutomationProperties.Name="Сбросить симуляцию" />
+        </WrapPanel>
+        <TextBlock x:Name="ScenarioDescriptionText" Foreground="{StaticResource MutedBrush}"
+                   Margin="0,10,0,0" TextWrapping="Wrap" />
+      </StackPanel>
+    </Border>
+
+    <Border Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}"
+            BorderThickness="1" CornerRadius="10" Padding="18" Margin="0,0,0,14">
+      <StackPanel>
+        <DockPanel LastChildFill="False" Margin="0,0,0,8">
+          <TextBlock x:Name="StepCountText" DockPanel.Dock="Left" Foreground="{StaticResource QuietBrush}"
+                     VerticalAlignment="Center" />
+          <TextBlock x:Name="StepStatusText" DockPanel.Dock="Right" Foreground="{StaticResource AccentBrush}"
+                     FontWeight="SemiBold" TextWrapping="Wrap" Margin="8,0,0,0" />
+        </DockPanel>
+        <TextBlock x:Name="StepTitleText" Text="Ожидание запуска" FontSize="20" FontWeight="SemiBold"
+                   TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
+        <TextBlock x:Name="StepDescriptionText" Foreground="{StaticResource MutedBrush}"
+                   Margin="0,6,0,0" TextWrapping="Wrap" />
+        <TextBlock Text="Далее" Foreground="{StaticResource QuietBrush}" FontSize="11"
+                   FontWeight="SemiBold" Margin="0,14,0,3" />
+        <TextBlock x:Name="NextActionText" Text="Нажмите «Начать», чтобы показать подготовленную последовательность."
+                   TextWrapping="Wrap" />
+      </StackPanel>
+    </Border>
+
+    <TextBlock Text="Состояние по площадкам" FontSize="17" FontWeight="SemiBold" Margin="0,4,0,9" />
+    <TextBlock x:Name="VenuesEmptyText" Text="Учебные балансы появятся после запуска сценария."
+               Foreground="{StaticResource MutedBrush}" Margin="0,0,0,10" TextWrapping="Wrap" />
+    <ItemsControl x:Name="VenuesItems" Margin="0,0,0,10">
+      <ItemsControl.ItemsPanel>
+        <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>
+      </ItemsControl.ItemsPanel>
+      <ItemsControl.ItemTemplate>
+        <DataTemplate>
+          <Border Width="220" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}"
+                  BorderThickness="1" CornerRadius="8" Padding="14" Margin="0,0,10,10">
+            <StackPanel>
+              <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextWrapping="Wrap" />
+              <TextBlock Text="{Binding Status}" Foreground="{StaticResource MutedBrush}"
+                         Margin="0,4,0,9" TextWrapping="Wrap" />
+              <Grid>
+                <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                <TextBlock Text="Всего" Foreground="{StaticResource MutedBrush}" />
+                <TextBlock Grid.Column="1" Text="{Binding Balance}" TextAlignment="Right" />
+                <TextBlock Grid.Row="1" Text="Доступно" Foreground="{StaticResource MutedBrush}" Margin="0,5,0,0" />
+                <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding Available}" TextAlignment="Right" Margin="8,5,0,0" />
+              </Grid>
+            </StackPanel>
+          </Border>
+        </DataTemplate>
+      </ItemsControl.ItemTemplate>
+    </ItemsControl>
+
+    <TextBlock Text="Кандидат" FontSize="17" FontWeight="SemiBold" Margin="0,4,0,9" />
+    <TextBlock x:Name="CandidatesEmptyText" Text="На этом шаге кандидата нет."
+               Foreground="{StaticResource MutedBrush}" Margin="0,0,0,10" />
+    <ItemsControl x:Name="CandidatesItems" Margin="0,0,0,10">
+      <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+      <ItemsControl.ItemTemplate>
+        <DataTemplate>
+          <Border Width="220" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}"
+                  BorderThickness="1" CornerRadius="8" Padding="14" Margin="0,0,10,10">
+            <StackPanel>
+              <DockPanel><TextBlock Text="{Binding Market}" FontWeight="SemiBold" /><TextBlock Text="{Binding Side}" Foreground="{StaticResource AccentBrush}" DockPanel.Dock="Right" Margin="8,0,0,0" /></DockPanel>
+              <TextBlock Text="{Binding Venue}" Foreground="{StaticResource MutedBrush}" Margin="0,4,0,8" />
+              <DockPanel><TextBlock Text="{Binding EntryType}" /><TextBlock Text="{Binding EntryPrice}" DockPanel.Dock="Right" Margin="8,0,0,0" /></DockPanel>
+              <DockPanel Margin="0,4,0,0"><TextBlock Text="TP" Foreground="{StaticResource MutedBrush}" /><TextBlock Text="{Binding TakeProfit}" DockPanel.Dock="Right" Margin="8,0,0,0" /></DockPanel>
+              <DockPanel Margin="0,2,0,0"><TextBlock Text="SL" Foreground="{StaticResource MutedBrush}" /><TextBlock Text="{Binding StopLoss}" DockPanel.Dock="Right" Margin="8,0,0,0" /></DockPanel>
+            </StackPanel>
+          </Border>
+        </DataTemplate>
+      </ItemsControl.ItemTemplate>
+    </ItemsControl>
+
+    <TextBlock Text="Заявки" FontSize="17" FontWeight="SemiBold" Margin="0,4,0,9" />
+    <TextBlock x:Name="OrdersEmptyText" Text="На этом шаге заявок нет."
+               Foreground="{StaticResource MutedBrush}" Margin="0,0,0,10" />
+    <ItemsControl x:Name="OrdersItems" Margin="0,0,0,10">
+      <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+      <ItemsControl.ItemTemplate>
+        <DataTemplate>
+          <Border Width="220" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}"
+                  BorderThickness="1" CornerRadius="8" Padding="14" Margin="0,0,10,10">
+            <StackPanel>
+              <DockPanel><TextBlock Text="{Binding Market}" FontWeight="SemiBold" /><TextBlock Text="{Binding Id}" Foreground="{StaticResource QuietBrush}" DockPanel.Dock="Right" Margin="8,0,0,0" /></DockPanel>
+              <TextBlock Text="{Binding Venue}" Foreground="{StaticResource MutedBrush}" Margin="0,4,0,8" />
+              <TextBlock Text="{Binding Side}" />
+              <TextBlock Text="{Binding Status}" Foreground="{StaticResource AccentBrush}" Margin="0,3,0,0" TextWrapping="Wrap" />
+              <TextBlock Text="Цена" Foreground="{StaticResource MutedBrush}" Margin="0,5,0,0" />
+              <TextBlock Text="{Binding Price}" TextWrapping="Wrap" />
+              <DockPanel Margin="0,4,0,0"><TextBlock Text="Исполнено" Foreground="{StaticResource MutedBrush}" /><TextBlock Text="{Binding Filled}" DockPanel.Dock="Right" Margin="8,0,0,0" /></DockPanel>
+              <DockPanel Margin="0,3,0,0"><TextBlock Text="Остаток" Foreground="{StaticResource MutedBrush}" /><TextBlock Text="{Binding Remaining}" DockPanel.Dock="Right" Margin="8,0,0,0" /></DockPanel>
+              <DockPanel Margin="0,3,0,0"><TextBlock Text="TP" Foreground="{StaticResource MutedBrush}" /><TextBlock Text="{Binding TakeProfit}" DockPanel.Dock="Right" Margin="8,0,0,0" /></DockPanel>
+              <DockPanel Margin="0,2,0,0"><TextBlock Text="SL" Foreground="{StaticResource MutedBrush}" /><TextBlock Text="{Binding StopLoss}" DockPanel.Dock="Right" Margin="8,0,0,0" /></DockPanel>
+            </StackPanel>
+          </Border>
+        </DataTemplate>
+      </ItemsControl.ItemTemplate>
+    </ItemsControl>
+
+    <TextBlock Text="Открытые позиции · плавающий результат" FontSize="17" FontWeight="SemiBold" Margin="0,4,0,9" />
+    <TextBlock x:Name="OpenPositionsEmptyText" Text="Открытых учебных позиций нет."
+               Foreground="{StaticResource MutedBrush}" Margin="0,0,0,10" />
+    <ItemsControl x:Name="OpenPositionsItems" Margin="0,0,0,10">
+      <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+      <ItemsControl.ItemTemplate>
+        <DataTemplate>
+          <Border Width="220" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}"
+                  BorderThickness="1" CornerRadius="8" Padding="14" Margin="0,0,10,10">
+            <StackPanel>
+              <DockPanel><TextBlock Text="{Binding Market}" FontWeight="SemiBold" /><TextBlock Text="{Binding Side}" Foreground="{StaticResource AccentBrush}" DockPanel.Dock="Right" Margin="8,0,0,0" /></DockPanel>
+              <TextBlock Text="{Binding Venue}" Foreground="{StaticResource MutedBrush}" Margin="0,4,0,8" />
+              <DockPanel><TextBlock Text="Объём" /><TextBlock Text="{Binding Quantity}" DockPanel.Dock="Right" Margin="8,0,0,0" /></DockPanel>
+              <DockPanel Margin="0,3,0,0"><TextBlock Text="Вход" Foreground="{StaticResource MutedBrush}" /><TextBlock Text="{Binding EntryPrice}" DockPanel.Dock="Right" Margin="8,0,0,0" /></DockPanel>
+              <TextBlock Text="Плавающий результат" Foreground="{StaticResource MutedBrush}" Margin="0,5,0,0" />
+              <TextBlock Text="{Binding Result}" FontWeight="SemiBold" />
+              <DockPanel Margin="0,4,0,0"><TextBlock Text="TP" Foreground="{StaticResource MutedBrush}" /><TextBlock Text="{Binding TakeProfit}" DockPanel.Dock="Right" Margin="8,0,0,0" /></DockPanel>
+              <DockPanel Margin="0,2,0,0"><TextBlock Text="SL" Foreground="{StaticResource MutedBrush}" /><TextBlock Text="{Binding StopLoss}" DockPanel.Dock="Right" Margin="8,0,0,0" /></DockPanel>
+            </StackPanel>
+          </Border>
+        </DataTemplate>
+      </ItemsControl.ItemTemplate>
+    </ItemsControl>
+
+    <TextBlock Text="Закрытые сделки · реализованный результат" FontSize="17" FontWeight="SemiBold" Margin="0,4,0,9" />
+    <TextBlock x:Name="ClosedPositionsEmptyText" Text="Закрытых учебных сделок нет."
+               Foreground="{StaticResource MutedBrush}" Margin="0,0,0,10" />
+    <ItemsControl x:Name="ClosedPositionsItems" Margin="0,0,0,10">
+      <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+      <ItemsControl.ItemTemplate>
+        <DataTemplate>
+          <Border Width="220" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}"
+                  BorderThickness="1" CornerRadius="8" Padding="14" Margin="0,0,10,10">
+            <StackPanel>
+              <DockPanel><TextBlock Text="{Binding Market}" FontWeight="SemiBold" /><TextBlock Text="{Binding Side}" Foreground="{StaticResource AccentBrush}" DockPanel.Dock="Right" Margin="8,0,0,0" /></DockPanel>
+              <TextBlock Text="{Binding Venue}" Foreground="{StaticResource MutedBrush}" Margin="0,4,0,8" />
+              <DockPanel><TextBlock Text="Объём" /><TextBlock Text="{Binding Quantity}" DockPanel.Dock="Right" Margin="8,0,0,0" /></DockPanel>
+              <DockPanel Margin="0,3,0,0"><TextBlock Text="Вход" Foreground="{StaticResource MutedBrush}" /><TextBlock Text="{Binding EntryPrice}" DockPanel.Dock="Right" Margin="8,0,0,0" /></DockPanel>
+              <TextBlock Text="Время закрытия" Foreground="{StaticResource MutedBrush}" Margin="0,5,0,0" />
+              <TextBlock Text="{Binding CloseTime}" />
+              <TextBlock Text="Реализованный результат" Foreground="{StaticResource MutedBrush}" Margin="0,4,0,0" />
+              <TextBlock Text="{Binding RealizedResult}" FontWeight="SemiBold" />
+              <TextBlock Text="Причина закрытия" Foreground="{StaticResource MutedBrush}" Margin="0,4,0,0" />
+              <TextBlock Text="{Binding CloseReason}" TextWrapping="Wrap" />
+            </StackPanel>
+          </Border>
+        </DataTemplate>
+      </ItemsControl.ItemTemplate>
+    </ItemsControl>
+
+    <TextBlock Text="Журнал и уведомления" FontSize="17" FontWeight="SemiBold" Margin="0,4,0,9" />
+    <ItemsControl x:Name="EventsItems" Margin="0,0,0,14">
+      <ItemsControl.ItemTemplate>
+        <DataTemplate>
+          <Border Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}"
+                  BorderThickness="1" CornerRadius="7" Padding="12" Margin="0,0,0,7">
+            <StackPanel>
+              <DockPanel><TextBlock Text="{Binding Time}" Foreground="{StaticResource QuietBrush}" /><TextBlock Text="{Binding CategoryLabel}" Foreground="{StaticResource MutedBrush}" DockPanel.Dock="Right" Margin="8,0,0,0" /></DockPanel>
+              <TextBlock Text="{Binding Title}" FontWeight="SemiBold" Margin="0,4,0,0" TextWrapping="Wrap" />
+              <TextBlock Text="{Binding Description}" Foreground="{StaticResource MutedBrush}" Margin="0,3,0,0" TextWrapping="Wrap" />
+            </StackPanel>
+          </Border>
+        </DataTemplate>
+      </ItemsControl.ItemTemplate>
+    </ItemsControl>
+    <TextBlock x:Name="EventsEmptyText" Text="Журнал заполнится событиями после запуска."
+               Foreground="{StaticResource MutedBrush}" Margin="0,0,0,10" />
+
+    <Border Background="{StaticResource RaisedPanelBrush}" BorderBrush="{StaticResource BorderBrush}"
+            BorderThickness="1" CornerRadius="9" Padding="14" Margin="0,0,0,12">
+      <StackPanel>
+        <DockPanel>
+          <TextBlock Text="Предпросмотр уведомления" FontWeight="SemiBold" />
+          <TextBlock Text="СИМУЛЯЦИЯ" Foreground="{StaticResource AccentBrush}" FontSize="10"
+                     FontWeight="SemiBold" DockPanel.Dock="Right" Margin="8,0,0,0" />
+        </DockPanel>
+        <TextBlock x:Name="NotificationEmptyText" Text="На текущем шаге уведомление не формируется."
+                   Foreground="{StaticResource MutedBrush}" Margin="0,6,0,0" TextWrapping="Wrap" />
+        <StackPanel x:Name="NotificationPreviewPanel" Visibility="Collapsed" Margin="0,6,0,0">
+          <DockPanel>
+            <TextBlock x:Name="NotificationCategoryText" Foreground="{StaticResource AccentBrush}" FontWeight="SemiBold" />
+            <TextBlock x:Name="NotificationTimeText" Foreground="{StaticResource QuietBrush}" DockPanel.Dock="Right" Margin="8,0,0,0" />
+          </DockPanel>
+          <TextBlock x:Name="NotificationTitleText" FontWeight="SemiBold" Margin="0,4,0,0" TextWrapping="Wrap" />
+          <TextBlock x:Name="NotificationMessageText" Foreground="{StaticResource MutedBrush}" Margin="0,3,0,0" TextWrapping="Wrap" />
+        </StackPanel>
+      </StackPanel>
+    </Border>
+    <TextBlock Text="Предыдущие учебные уведомления" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,8" />
+    <TextBlock x:Name="NotificationsEmptyText" Text="В этом сценарии пока нет уведомлений."
+               Foreground="{StaticResource MutedBrush}" Margin="0,0,0,12" TextWrapping="Wrap" />
+    <ItemsControl x:Name="NotificationsItems" Margin="0,0,0,18">
+      <ItemsControl.ItemTemplate>
+        <DataTemplate>
+          <Border Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}"
+                  BorderThickness="1" CornerRadius="7" Padding="12" Margin="0,0,0,7">
+            <StackPanel>
+              <DockPanel>
+                <TextBlock Text="{Binding Category}" Foreground="{StaticResource AccentBrush}" FontWeight="SemiBold" />
+                <TextBlock Text="{Binding Time}" Foreground="{StaticResource QuietBrush}" DockPanel.Dock="Right" Margin="8,0,0,0" />
+              </DockPanel>
+              <TextBlock Text="{Binding Title}" FontWeight="SemiBold" Margin="0,4,0,0" TextWrapping="Wrap" />
+              <TextBlock Text="{Binding Message}" Foreground="{StaticResource MutedBrush}" Margin="0,3,0,0" TextWrapping="Wrap" />
+              <TextBlock Text="СИМУЛЯЦИЯ" Foreground="{StaticResource AccentBrush}" FontSize="9"
+                         FontWeight="SemiBold" Margin="0,6,0,0" />
+            </StackPanel>
+          </Border>
+        </DataTemplate>
+      </ItemsControl.ItemTemplate>
+    </ItemsControl>
+  </StackPanel>
+</UserControl>
