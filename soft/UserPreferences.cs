@@ -18,6 +18,11 @@ internal static class UserPreferences
         "TrueNorth TradeFlow",
         "recovery-state.json");
 
+    internal static string TelegramCredentialsPath => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "TrueNorth TradeFlow",
+        "telegram-credentials.dat");
+
     internal static bool? ReadLegacyPreventSleep()
     {
         using var key = Registry.CurrentUser.OpenSubKey(KeyPath);

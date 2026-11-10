@@ -2,6 +2,7 @@ using System.IO;
 using System.Security;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using TrueNorth.TradeFlow.Notifications;
 
 namespace TrueNorth.TradeFlow.Recovery;
 
@@ -58,7 +59,9 @@ internal sealed record RecoveryVenueState(
     [property: JsonRequired] bool ReadInProgress,
     [property: JsonRequired] DateTimeOffset? ReconciledAt,
     [property: JsonRequired] string? LastReadFailure,
-    DateTimeOffset? ReadStartedAt = null);
+    DateTimeOffset? ReadStartedAt = null,
+    DateTimeOffset? NextReminderAt = null,
+    int ReminderSequence = 0);
 
 internal sealed record RecoveryOperation(
     [property: JsonRequired] string OperationId,
@@ -85,7 +88,8 @@ internal sealed record RecoveryEvent(
     [property: JsonRequired] string? OperationId,
     [property: JsonRequired] DateTimeOffset At,
     [property: JsonRequired] string Message,
-    string? InternalDetail = null)
+    string? InternalDetail = null,
+    bool IsReminder = false)
 {
     [JsonIgnore]
     internal string SafeSummary => Type switch
@@ -101,6 +105,8 @@ internal sealed record RecoveryJournalState
     public List<RecoveryVenueState> Venues { get; init; } = [];
     public List<RecoveryOperation> Operations { get; init; } = [];
     public List<RecoveryEvent> Events { get; init; } = [];
+    public List<NotificationDeliveryAttempt> NotificationAttempts { get; init; } = [];
+    public DateTimeOffset? TelegramRetryAfterAt { get; init; }
 }
 
 internal sealed record RecoveryJournalEnvelope(int FormatVersion, RecoveryJournalState State);
@@ -338,7 +344,8 @@ internal sealed class RecoveryJournalStore
     private static bool Validate(RecoveryJournalState? state, out string? error)
     {
         error = null;
-        if (state?.Venues is null || state.Operations is null || state.Events is null)
+        if (state?.Venues is null || state.Operations is null || state.Events is null
+            || state.NotificationAttempts is null)
         {
             error = "Журнал восстановления содержит отсутствующий список.";
             return false;
@@ -361,7 +368,10 @@ internal sealed class RecoveryJournalStore
                 || (venue.Phase == RecoveryReadPhase.Periodic && !venue.ErrorEventEmitted)
                 || (venue.Phase == RecoveryReadPhase.AdditionalReads
                     && venue.AdditionalReadsRemaining == 0 && !venue.ReadInProgress)
-                || (!venue.ReadInProgress && venue.ReadStartedAt is not null)))
+                || (!venue.ReadInProgress && venue.ReadStartedAt is not null)
+                || venue.ReminderSequence < 0
+                || (venue.NextReminderAt is not null
+                    && (venue.Phase == RecoveryReadPhase.Resolved || !venue.ErrorEventEmitted))))
         {
             error = "Журнал восстановления содержит недопустимую паузу или срок.";
             return false;
@@ -411,6 +421,23 @@ internal sealed class RecoveryJournalStore
             || state.Events.Select(recoveryEvent => recoveryEvent.EventId).Distinct(StringComparer.Ordinal).Count() != state.Events.Count)
         {
             error = "Журнал восстановления содержит недопустимое или повторяющееся событие.";
+            return false;
+        }
+
+        if (state.Events.Any(recoveryEvent => recoveryEvent.IsReminder && recoveryEvent.Type != RecoveryEventType.Error)
+            || state.NotificationAttempts.Any(attempt => attempt is null
+                || string.IsNullOrWhiteSpace(attempt.MessageId)
+                || attempt.MessageId.Length > 256
+                || attempt.MessageId.Any(character => !char.IsAsciiLetterOrDigit(character)
+                    && character is not (':' or '-' or '_' or '.'))
+                || !Enum.IsDefined(attempt.Channel)
+                || !Enum.IsDefined(attempt.Status)
+                || (attempt.Status == NotificationAttemptStatus.InProgress && attempt.CompletedAt is not null)
+                || (attempt.Status != NotificationAttemptStatus.InProgress && attempt.CompletedAt is null))
+            || state.NotificationAttempts.Select(attempt => (attempt.MessageId, attempt.Channel))
+                .Distinct().Count() != state.NotificationAttempts.Count)
+        {
+            error = "Журнал восстановления содержит недопустимую попытку уведомления.";
             return false;
         }
 

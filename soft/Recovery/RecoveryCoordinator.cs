@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using TrueNorth.TradeFlow.Notifications;
 using TrueNorth.TradeFlow.Account;
 
 namespace TrueNorth.TradeFlow.Recovery;
@@ -66,7 +67,7 @@ internal sealed class RecoveryCoordinator
     private readonly RecoveryJournalStore _store;
     private readonly IRecoverySnapshotSource? _source;
     private readonly IRecoveryClock _clock;
-    private readonly AppSettings _settings;
+    private AppSettings _settings;
     private readonly SemaphoreSlim _stateGate = new(1, 1);
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _venueChecks = new(StringComparer.Ordinal);
     private volatile RecoveryJournalState _state = new();
@@ -103,8 +104,13 @@ internal sealed class RecoveryCoordinator
     {
         Venues = [.. _state.Venues],
         Operations = [.. _state.Operations],
-        Events = [.. _state.Events]
+        Events = [.. _state.Events],
+        NotificationAttempts = [.. _state.NotificationAttempts],
+        TelegramRetryAfterAt = _state.TelegramRetryAfterAt
     };
+
+    internal void UpdateSettings(AppSettings settings) =>
+        Volatile.Write(ref _settings, settings.Copy());
 
     internal bool HasPendingRecovery => !_storageReady
         || _state.Venues.Any(venue => venue.Phase != RecoveryReadPhase.Resolved)
@@ -166,6 +172,151 @@ internal sealed class RecoveryCoordinator
             return false;
         return !_state.Operations.Any(operation => operation.Venue == venue
             && operation.Stage is (RecoveryOperationStage.TransferStarted or RecoveryOperationStage.Unknown));
+    }
+
+    internal Task<NotificationAttemptStartResult> BeginNotificationAttemptAsync(
+        string messageId,
+        NotificationChannel channel,
+        CancellationToken cancellationToken = default) =>
+        BeginNotificationAttemptCoreAsync(messageId, channel, null, cancellationToken);
+
+    internal Task<NotificationAttemptStartResult> BeginReminderNotificationAttemptAsync(
+        string messageId,
+        string episodeId,
+        NotificationChannel channel,
+        CancellationToken cancellationToken = default) =>
+        BeginNotificationAttemptCoreAsync(messageId, channel, episodeId, cancellationToken);
+
+    private async Task<NotificationAttemptStartResult> BeginNotificationAttemptCoreAsync(
+        string messageId,
+        NotificationChannel channel,
+        string? reminderEpisodeId,
+        CancellationToken cancellationToken)
+    {
+        if (!IsNotificationMessageId(messageId) || !Enum.IsDefined(channel))
+            return new(NotificationAttemptStartStatus.StorageUnavailable);
+
+        await _stateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (!_storageReady)
+                return new(NotificationAttemptStartStatus.StorageUnavailable);
+            if (reminderEpisodeId is not null
+                && (!IsNotificationMessageId(reminderEpisodeId)
+                    || !IsCurrentActiveReminder(_state, messageId, reminderEpisodeId)))
+                return new(NotificationAttemptStartStatus.ObsoleteReminder);
+
+            var existing = _state.NotificationAttempts.FirstOrDefault(attempt =>
+                attempt.MessageId == messageId && attempt.Channel == channel);
+            if (existing is not null)
+                return new(NotificationAttemptStartStatus.AlreadyAttempted, existing);
+
+            var retryAfterAt = _state.TelegramRetryAfterAt;
+            if (channel == NotificationChannel.Telegram
+                && retryAfterAt is DateTimeOffset blockedUntil && blockedUntil > _clock.UtcNow)
+                return new(NotificationAttemptStartStatus.RateLimited, RetryAfterAt: retryAfterAt);
+
+            var attempt = new NotificationDeliveryAttempt(messageId, channel,
+                NotificationAttemptStatus.InProgress, _clock.UtcNow);
+            var state = _state with { NotificationAttempts = [.. _state.NotificationAttempts, attempt] };
+            return SaveState(state)
+                ? new(NotificationAttemptStartStatus.Started)
+                : new(NotificationAttemptStartStatus.StorageUnavailable);
+        }
+        finally
+        {
+            _stateGate.Release();
+        }
+    }
+
+    internal async Task<bool> CompleteNotificationAttemptAsync(
+        string messageId,
+        NotificationChannel channel,
+        NotificationAttemptStatus status,
+        int? retryAfterSeconds = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (!IsNotificationMessageId(messageId)
+            || !Enum.IsDefined(channel)
+            || status is NotificationAttemptStatus.InProgress
+            || (channel == NotificationChannel.Windows && status == NotificationAttemptStatus.AcceptedByTelegram)
+            || (channel == NotificationChannel.Telegram && status == NotificationAttemptStatus.PassedToWindows)
+            || retryAfterSeconds is <= 0)
+            return false;
+
+        await _stateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (!_storageReady)
+                return false;
+
+            var index = _state.NotificationAttempts.FindIndex(attempt =>
+                attempt.MessageId == messageId && attempt.Channel == channel
+                && attempt.Status == NotificationAttemptStatus.InProgress);
+            if (index < 0)
+                return false;
+
+            var now = _clock.UtcNow;
+            var attempts = _state.NotificationAttempts.ToList();
+            attempts[index] = attempts[index] with { Status = status, CompletedAt = now };
+            var retryAfterAt = channel == NotificationChannel.Telegram && retryAfterSeconds is int seconds
+                ? now.AddSeconds(seconds)
+                : _state.TelegramRetryAfterAt;
+            return SaveState(_state with
+            {
+                NotificationAttempts = attempts,
+                TelegramRetryAfterAt = retryAfterAt
+            });
+        }
+        finally
+        {
+            _stateGate.Release();
+        }
+    }
+
+    internal async Task ProcessDueFailureRemindersAsync(CancellationToken cancellationToken = default)
+    {
+        await _stateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (!_storageReady)
+                return;
+            var settings = Volatile.Read(ref _settings);
+            if (!settings.NotificationsEnabled || !settings.ErrorNotifications
+                || !settings.FailureRemindersEnabled)
+                return;
+
+            var now = _clock.UtcNow;
+            var venues = _state.Venues.ToList();
+            var events = _state.Events.ToList();
+            var changed = false;
+            for (var index = 0; index < venues.Count; index++)
+            {
+                var venue = venues[index];
+                if (venue.Phase == RecoveryReadPhase.Resolved || !venue.ErrorEventEmitted
+                    || venue.NextReminderAt is not DateTimeOffset dueAt || dueAt > now)
+                    continue;
+
+                var sequence = venue.ReminderSequence + 1;
+                var reminder = new RecoveryEvent($"{venue.EpisodeId}:reminder:{sequence}",
+                    RecoveryEventType.Error, venue.EpisodeId, venue.Venue, venue.Account, null, null, now,
+                    "Новые входы приостановлены; состояние требует полной сверки.", null, IsReminder: true);
+                events.Add(reminder);
+                venues[index] = venue with
+                {
+                    ReminderSequence = sequence,
+                    NextReminderAt = now.AddMinutes(settings.FailureReminderMinutes)
+                };
+                changed = true;
+            }
+
+            if (changed)
+                SaveState(_state with { Venues = venues, Events = events });
+        }
+        finally
+        {
+            _stateGate.Release();
+        }
     }
 
     internal async Task<string?> ReportFailureAsync(
@@ -425,7 +576,7 @@ internal sealed class RecoveryCoordinator
                         ReadInProgress = false,
                         LastReadFailure = due.LastReadFailure ?? "Повторы чтения исчерпаны."
                     };
-                    SaveState(EmitError(_state, exhausted, now));
+                    SaveState(EmitError(_state, exhausted, now, Volatile.Read(ref _settings)));
                     return false;
                 }
 
@@ -501,7 +652,7 @@ internal sealed class RecoveryCoordinator
                         Phase = RecoveryReadPhase.Periodic,
                         NextCheckAt = now.AddSeconds(failed.RecoveryCheckSeconds)
                     };
-                    SaveState(EmitError(_state, failed, now));
+                    SaveState(EmitError(_state, failed, now, Volatile.Read(ref _settings)));
                     return true;
                 }
                 else if (failed.Phase == RecoveryReadPhase.Periodic)
@@ -579,7 +730,7 @@ internal sealed class RecoveryCoordinator
                     NextCheckAt = now.AddSeconds(venue.RecoveryCheckSeconds),
                     LastReadFailure = "Процесс завершился во время последнего дополнительного чтения."
                 };
-                state = EmitError(state, recoveredRead, now);
+                state = EmitError(state, recoveredRead, now, Volatile.Read(ref _settings));
             }
             else
             {
@@ -639,19 +790,26 @@ internal sealed class RecoveryCoordinator
             false, false, false, null, null, null);
         state = ReplaceVenue(state, failure);
         return unknownScope || settings.ReadRetryCount == 0
-            ? EmitError(state, failure, now)
+            ? EmitError(state, failure, now, settings)
             : state;
     }
 
     private static RecoveryJournalState EmitError(
         RecoveryJournalState state,
         RecoveryVenueState venue,
-        DateTimeOffset now)
+        DateTimeOffset now,
+        AppSettings settings)
     {
         if (venue.ErrorEventEmitted)
             return ReplaceVenue(state, venue);
 
-        var updated = venue with { ErrorEventEmitted = true };
+        var updated = venue with
+        {
+            ErrorEventEmitted = true,
+            NextReminderAt = settings.FailureRemindersEnabled
+                ? now.AddMinutes(settings.FailureReminderMinutes)
+                : null
+        };
         const string safeSummary = "Новые входы приостановлены; состояние требует полной сверки.";
         var recoveryEvent = new RecoveryEvent(venue.EpisodeId + ":error", RecoveryEventType.Error,
             venue.EpisodeId, venue.Venue, venue.Account, null, null, now,
@@ -698,6 +856,7 @@ internal sealed class RecoveryCoordinator
             ReadInProgress = false,
             ReadStartedAt = null,
             NextCheckAt = null,
+            NextReminderAt = null,
             RecoveryEventEmitted = true,
             ReconciledAt = now,
             LastReadFailure = null
@@ -711,6 +870,24 @@ internal sealed class RecoveryCoordinator
             state = state with { Events = [.. state.Events, recoveryEvent] };
         }
         return state;
+    }
+
+    private static bool IsNotificationMessageId(string messageId) =>
+        !string.IsNullOrWhiteSpace(messageId)
+        && messageId.Length <= 256
+        && messageId.All(character => char.IsAsciiLetterOrDigit(character)
+            || character is ':' or '-' or '_' or '.');
+
+    private static bool IsCurrentActiveReminder(RecoveryJournalState state, string messageId, string episodeId)
+    {
+        var venue = state.Venues.FirstOrDefault(candidate => candidate.EpisodeId == episodeId
+            && candidate.Phase != RecoveryReadPhase.Resolved);
+        if (venue is null || !venue.ErrorEventEmitted || venue.ReminderSequence <= 0)
+            return false;
+
+        var latestReminder = state.Events.LastOrDefault(item => item.EpisodeId == episodeId && item.IsReminder);
+        return latestReminder?.EventId == messageId
+            && messageId == $"{episodeId}:reminder:{venue.ReminderSequence}";
     }
 
     private static string? ValidateSnapshot(

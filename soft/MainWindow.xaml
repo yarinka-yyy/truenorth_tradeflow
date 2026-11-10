@@ -383,7 +383,7 @@
                     BorderThickness="1" CornerRadius="10" Padding="20" Margin="0,0,0,16">
               <StackPanel>
                 <TextBlock Text="Уведомления" FontSize="16" FontWeight="SemiBold" />
-                <TextBlock Text="Здесь сохраняются предпочтения. Доставка уведомлений появится на следующем этапе."
+                <TextBlock Text="Windows показывает уведомления через значок в трее. Telegram можно подключить отдельно."
                            Foreground="{StaticResource MutedBrush}" Margin="0,6,0,12" TextWrapping="Wrap" />
                 <CheckBox x:Name="NotificationsEnabledCheckBox" Content="Включить уведомления"
                           FontWeight="SemiBold" AutomationProperties.Name="Включить уведомления" />
@@ -401,6 +401,32 @@
                   <DockPanel><TextBlock DockPanel.Dock="Right" Text="мин" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center" Margin="9,0,0,0" /><TextBox x:Name="FailureReminderMinutesTextBox" Style="{StaticResource FormTextBox}" Width="180" HorizontalAlignment="Left" AutomationProperties.Name="Интервал напоминаний, минуты" /></DockPanel>
                   <TextBlock x:Name="FailureReminderMinutesErrorText" Foreground="{StaticResource WarningBrush}" Margin="0,5,0,0" TextWrapping="Wrap" />
                 </StackPanel>
+                <TextBlock Text="Telegram" FontWeight="SemiBold" Margin="0,16,0,8" />
+                <CheckBox x:Name="TelegramEnabledCheckBox" Content="Разрешить отправку в Telegram"
+                          AutomationProperties.Name="Разрешить отправку уведомлений в Telegram"
+                          FocusVisualStyle="{StaticResource FocusOutline}" />
+                <TextBlock Text="Новые значения токена и чата сохраняются одной защищённой парой. Сохранённые значения здесь не отображаются."
+                           Foreground="{StaticResource MutedBrush}" Margin="0,6,0,8" TextWrapping="Wrap" />
+                <TextBlock Text="Токен бота" Foreground="{StaticResource MutedBrush}" Margin="0,0,0,5" />
+                <PasswordBox x:Name="TelegramTokenPasswordBox" MaxLength="256" MinHeight="36" Padding="9,7"
+                             Background="#111D27" Foreground="{StaticResource TextBrush}"
+                             BorderBrush="{StaticResource BorderBrush}" CaretBrush="{StaticResource AccentBrush}"
+                             FocusVisualStyle="{StaticResource FocusOutline}"
+                             AutomationProperties.Name="Новый токен Telegram-бота" />
+                <TextBlock Text="ID чата" Foreground="{StaticResource MutedBrush}" Margin="0,10,0,5" />
+                <TextBox x:Name="TelegramChatIdTextBox" Style="{StaticResource FormTextBox}" MaxLength="24"
+                         AutomationProperties.Name="Новый ID чата Telegram" />
+                <TextBlock x:Name="TelegramSavedStatusText" Foreground="{StaticResource MutedBrush}"
+                           Margin="0,7,0,0" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
+                <TextBlock Text="Тест использует последние сохранённые настройки и отправляет только безопасный текст."
+                           Foreground="{StaticResource MutedBrush}" Margin="0,8,0,0" TextWrapping="Wrap" />
+                <Button x:Name="SendNotificationTestButton" Style="{StaticResource SecondaryAction}"
+                        Content="Отправить тест" Margin="0,10,0,0" HorizontalAlignment="Left"
+                        Click="SendNotificationTest_Click"
+                        AutomationProperties.Name="Отправить тестовое уведомление"
+                        FocusVisualStyle="{StaticResource FocusOutline}" />
+                <TextBlock x:Name="NotificationTestStatusText" Foreground="{StaticResource MutedBrush}"
+                           Margin="0,8,0,0" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
               </StackPanel>
             </Border>
 

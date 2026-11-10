@@ -34,11 +34,13 @@ internal static class Program
             if (recoveryOnly)
             {
                 RecoveryChecks.CheckCore(Check, fixtureRoot);
+                NotificationChecks.CheckCore(Check, fixtureRoot);
                 var app = new App();
                 app.InitializeComponent();
                 try
                 {
                     RecoveryChecks.CheckNativeWpf(Check, fixtureRoot);
+                    NotificationChecks.CheckNativeWpf(Check, fixtureRoot, exerciseWindowsBalloon: true);
                 }
                 finally
                 {
@@ -61,6 +63,7 @@ internal static class Program
             AccountReadChecks.CheckCore(Check);
             EntryEligibilityChecks.CheckCore(Check);
             RecoveryChecks.CheckCore(Check, fixtureRoot);
+            NotificationChecks.CheckCore(Check, fixtureRoot);
             CheckNativeWpf(fixtureRoot);
             Console.WriteLine($"PASS: {_checks} assertions");
             return 0;
@@ -587,6 +590,7 @@ internal static class Program
             AccountReadChecks.CheckNativeWpf(Check, root);
             EntryEligibilityChecks.CheckNativeWpf(Check, root);
             RecoveryChecks.CheckNativeWpf(Check, root);
+            NotificationChecks.CheckNativeWpf(Check, root);
         }
         finally
         {
@@ -695,6 +699,10 @@ internal static class Program
 
     private static string ArtifactsDirectory()
     {
+        var configuredPath = Environment.GetEnvironmentVariable("TRUENORTH_TRADEFLOW_VERIFY_ARTIFACTS");
+        if (!string.IsNullOrWhiteSpace(configuredPath))
+            return Path.GetFullPath(configuredPath);
+
         for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
         {
             if (File.Exists(Path.Combine(directory.FullName, "plans", "002-persistent-settings.md")))

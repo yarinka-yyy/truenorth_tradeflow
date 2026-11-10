@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Threading;
 using System.Windows;
 using System.Windows.Threading;
+using TrueNorth.TradeFlow.Notifications;
 using TrueNorth.TradeFlow.Recovery;
 using Forms = System.Windows.Forms;
 
@@ -21,6 +22,8 @@ public partial class App : System.Windows.Application
     private WakeProtectionController? _wakeProtection;
     private TrueNorthSessionService? _sessionService;
     private RecoveryCoordinator? _recoveryCoordinator;
+    private NotificationDispatcher? _notificationDispatcher;
+    private TelegramCredentialStore? _telegramCredentialStore;
     private MainWindow? _mainWindow;
     private bool _ownsMutex;
     private bool _isClosing;
@@ -60,15 +63,29 @@ public partial class App : System.Windows.Application
 
         var settingsStore = new SettingsStore(UserPreferences.SettingsPath, UserPreferences.ReadLegacyPreventSleep);
         var settings = settingsStore.Load();
-        _recoveryCoordinator = new RecoveryCoordinator(
+        var recoveryCoordinator = new RecoveryCoordinator(
             new RecoveryJournalStore(UserPreferences.RecoveryStatePath), settings.Profile.Settings);
+        _recoveryCoordinator = recoveryCoordinator;
         _wakeProtection = new WakeProtectionController(settings.Profile.Settings.PreventSleep);
         _sessionService = new TrueNorthSessionService();
+        InitializeTrayIcon();
+        var notificationSettings = settings.Profile.Settings.Copy();
+        if (settings.Status is not (SettingsFileStatus.Missing or SettingsFileStatus.Loaded))
+        {
+            notificationSettings.NotificationsEnabled = false;
+        }
+        recoveryCoordinator.UpdateSettings(notificationSettings);
+        _telegramCredentialStore = new TelegramCredentialStore(UserPreferences.TelegramCredentialsPath);
+        _notificationDispatcher = new NotificationDispatcher(recoveryCoordinator,
+            [new WindowsNotificationChannel(_trayIcon!, Dispatcher),
+             new TelegramNotificationChannel(_telegramCredentialStore)], notificationSettings);
         _mainWindow = new MainWindow(settingsStore, settings, _wakeProtection, _sessionService,
-            recoveryCoordinator: _recoveryCoordinator);
+            recoveryCoordinator: _recoveryCoordinator,
+            notificationDispatcher: _notificationDispatcher,
+            telegramCredentialStore: _telegramCredentialStore);
         MainWindow = _mainWindow;
         _mainWindow.ShowInTaskbar = false;
-        InitializeTrayIcon();
+        _notificationDispatcher.Start();
         SessionEnding += HandleSessionEnding;
 
         if (!e.Args.Contains("--startup", StringComparer.OrdinalIgnoreCase))
@@ -145,6 +162,8 @@ public partial class App : System.Windows.Application
 
         _isClosing = true;
         _mainWindow?.PrepareForApplicationClose();
+        _notificationDispatcher?.Dispose();
+        _notificationDispatcher = null;
         _sessionService?.Close();
         _trayIcon?.Dispose();
         _trayIcon = null;
@@ -159,6 +178,7 @@ public partial class App : System.Windows.Application
         _uninstallWait?.Unregister(null);
         _openEvent?.Dispose();
         _uninstallEvent?.Dispose();
+        _notificationDispatcher?.Dispose();
         _trayIcon?.Dispose();
         _wakeProtection?.Dispose();
         _sessionService?.Dispose();

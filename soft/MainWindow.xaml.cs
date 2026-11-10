@@ -8,6 +8,7 @@ using System.Windows;
 using System.Windows.Controls;
 using TextBox = System.Windows.Controls.TextBox;
 using TrueNorth.TradeFlow.Account;
+using TrueNorth.TradeFlow.Notifications;
 using TrueNorth.TradeFlow.Recovery;
 using TrueNorth.TradeFlow.Risk;
 
@@ -21,6 +22,8 @@ public partial class MainWindow : Window
     private readonly IAiAnalysisSource _aiAnalysisSource;
     private readonly AiTestReportStore _aiTestReportStore;
     private readonly RecoveryCoordinator? _recoveryCoordinator;
+    private readonly NotificationDispatcher? _notificationDispatcher;
+    private readonly TelegramCredentialStore? _telegramCredentialStore;
     private readonly ObservableCollection<AssetDraft> _assetRows = [];
     private SettingsProfile _savedProfile;
     private SettingsFileStatus _fileStatus;
@@ -53,7 +56,9 @@ public partial class MainWindow : Window
         ITrueNorthSessionService? trueNorthSession = null,
         IAiAnalysisSource? aiAnalysisSource = null,
         AiTestReportStore? aiTestReportStore = null,
-        RecoveryCoordinator? recoveryCoordinator = null)
+        RecoveryCoordinator? recoveryCoordinator = null,
+        NotificationDispatcher? notificationDispatcher = null,
+        TelegramCredentialStore? telegramCredentialStore = null)
     {
         InitializeComponent();
         _settingsStore = settingsStore;
@@ -67,6 +72,8 @@ public partial class MainWindow : Window
         _aiAnalysisSource = aiAnalysisSource ?? new SyntheticAiAnalysisSource();
         _aiTestReportStore = aiTestReportStore ?? new AiTestReportStore(AiTestReportStore.DefaultDirectory());
         _recoveryCoordinator = recoveryCoordinator;
+        _notificationDispatcher = notificationDispatcher;
+        _telegramCredentialStore = telegramCredentialStore;
         _wakeProtection.StateChanged += UpdatePowerStatusFromController;
         if (_recoveryCoordinator is not null)
             _recoveryCoordinator.StatusChanged += UpdateRecoveryStatusFromCoordinator;
@@ -308,6 +315,8 @@ public partial class MainWindow : Window
         }
 
         _savedProfile = result.Profile!;
+        _notificationDispatcher?.UpdateSettings(_savedProfile.Settings);
+        _recoveryCoordinator?.UpdateSettings(_savedProfile.Settings);
         _fileStatus = SettingsFileStatus.Loaded;
         _loadMessage = null;
         _canRecover = false;
@@ -593,6 +602,17 @@ public partial class MainWindow : Window
         RecoveryNotificationsCheckBox.IsChecked = settings.RecoveryNotifications;
         FailureRemindersEnabledCheckBox.IsChecked = settings.FailureRemindersEnabled;
         FailureReminderMinutesTextBox.Text = settings.FailureReminderMinutes.ToString(CultureInfo.CurrentCulture);
+        TelegramEnabledCheckBox.IsChecked = _telegramCredentialStore?.IsEnabled == true;
+        TelegramTokenPasswordBox.Clear();
+        TelegramChatIdTextBox.Clear();
+        NotificationTestStatusText.Text = string.Empty;
+        TelegramSavedStatusText.Text = _telegramCredentialStore is null
+            ? "Сохранённая пара здесь не отображается."
+            : _telegramCredentialStore.HasCredentials
+                ? _telegramCredentialStore.IsEnabled
+                    ? "Пара Telegram сохранена и включена; её значения скрыты."
+                    : "Пара Telegram сохранена, но отправка отключена."
+                : "Пара Telegram не сохранена.";
         PreventSleepCheckBox.IsChecked = settings.PreventSleep;
         ClearFieldErrors();
     }
@@ -665,14 +685,56 @@ public partial class MainWindow : Window
             return;
         }
 
+        var token = TelegramTokenPasswordBox.Password.Trim();
+        var chatId = TelegramChatIdTextBox.Text.Trim();
+        var telegramEnabled = TelegramEnabledCheckBox.IsChecked == true;
+        var credentialsSaved = false;
+        if (token.Length > 0 || chatId.Length > 0)
+        {
+            if (token.Length == 0 || chatId.Length == 0 || _telegramCredentialStore is null
+                || !_telegramCredentialStore.SavePair(token, chatId, telegramEnabled))
+            {
+                SetStatus("Пара Telegram не сохранена. Проверьте токен и ID чата. Если сохранённая пара уже была, она не изменена.", warning: true);
+                return;
+            }
+            credentialsSaved = true;
+            TelegramTokenPasswordBox.Clear();
+            TelegramChatIdTextBox.Clear();
+            TelegramSavedStatusText.Text = telegramEnabled
+                ? "Пара Telegram сохранена и включена; её значения скрыты."
+                : "Пара Telegram сохранена, но отправка отключена.";
+        }
+        else if (_telegramCredentialStore is not null
+                 && !telegramEnabled && !_telegramCredentialStore.SetEnabled(false))
+        {
+            TelegramSavedStatusText.Text = "Telegram отключён в этой сессии, но настройку отключения не удалось сохранить.";
+            SetStatus("Не удалось сохранить отключение Telegram. Новые отправки в этой сессии остановлены.", warning: true);
+            return;
+        }
+        else if (_telegramCredentialStore is not null
+                 && telegramEnabled && !_telegramCredentialStore.SetEnabled(true))
+        {
+            SetStatus("Для Telegram сначала сохраните новую пару токен и ID чата или отключите Telegram.", warning: true);
+            return;
+        }
+        else if (_telegramCredentialStore is null && telegramEnabled)
+        {
+            SetStatus("Защищённая конфигурация Telegram недоступна. Сначала задайте пару токен и ID чата.", warning: true);
+            return;
+        }
+
         var result = _settingsStore.Save(validation.Profile, replaceCorruptFile: true);
         if (!result.Succeeded)
         {
-            SetStatus(result.Message ?? "Не удалось сохранить настройки.", warning: true);
+            SetStatus(credentialsSaved
+                ? "Пара Telegram сохранена отдельно, но общие настройки не сохранены. " + (result.Message ?? string.Empty)
+                : result.Message ?? "Не удалось сохранить настройки.", warning: true);
             return;
         }
 
         _savedProfile = result.Profile!;
+        _notificationDispatcher?.UpdateSettings(_savedProfile.Settings);
+        _recoveryCoordinator?.UpdateSettings(_savedProfile.Settings);
         _fileStatus = SettingsFileStatus.Loaded;
         _loadMessage = null;
         _canRecover = false;
@@ -766,11 +828,41 @@ public partial class MainWindow : Window
         _wakeProtection.SetEnabled(_appliedPreventSleep);
         SetModeSelection(_savedProfile.SelectedMode);
         LoadDraft(_savedProfile.Settings);
+        _notificationDispatcher?.UpdateSettings(_savedProfile.Settings);
+        _recoveryCoordinator?.UpdateSettings(_savedProfile.Settings);
         UpdateMonitoringIntent();
         UpdatePowerStatus();
         UpdateModeLabel();
         ShowRecoveryButton(false);
         SetStatus("Последняя исправная копия восстановлена. Повреждённый файл сохранён рядом.", warning: false);
+    }
+
+    private async void SendNotificationTest_Click(object sender, RoutedEventArgs e)
+    {
+        if (_notificationDispatcher is null)
+        {
+            NotificationTestStatusText.Text = "Тест недоступен в этой конфигурации окна.";
+            return;
+        }
+
+        SendNotificationTestButton.IsEnabled = false;
+        NotificationTestStatusText.Text = "Отправка теста...";
+        try
+        {
+            var report = await _notificationDispatcher.SendTestAsync();
+            var status = string.Join(Environment.NewLine,
+                report.Channels.Select(result => $"{result.Channel}: {result.SafeStatus}"));
+            await Dispatcher.InvokeAsync(() => NotificationTestStatusText.Text = status);
+        }
+        catch (Exception)
+        {
+            await Dispatcher.InvokeAsync(() =>
+                NotificationTestStatusText.Text = "Тест завершён с неизвестным исходом; автоматический повтор запрещён.");
+        }
+        finally
+        {
+            await Dispatcher.InvokeAsync(() => SendNotificationTestButton.IsEnabled = true);
+        }
     }
 
     private void ShowLoadStatus()
