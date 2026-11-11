@@ -9,6 +9,7 @@ using System.Windows.Controls;
 using TextBox = System.Windows.Controls.TextBox;
 using TrueNorth.TradeFlow.Account;
 using TrueNorth.TradeFlow.Notifications;
+using TrueNorth.TradeFlow.Orders;
 using TrueNorth.TradeFlow.Recovery;
 using TrueNorth.TradeFlow.Risk;
 
@@ -24,6 +25,7 @@ public partial class MainWindow : Window
     private readonly RecoveryCoordinator? _recoveryCoordinator;
     private readonly NotificationDispatcher? _notificationDispatcher;
     private readonly TelegramCredentialStore? _telegramCredentialStore;
+    private readonly Func<LocalOrderLifecycleExampleSession> _orderLifecycleExampleFactory;
     private readonly ObservableCollection<AssetDraft> _assetRows = [];
     private SettingsProfile _savedProfile;
     private SettingsFileStatus _fileStatus;
@@ -48,6 +50,8 @@ public partial class MainWindow : Window
     private bool _aiBatchCompleted;
     private bool _aiReportSaveInProgress;
     private IReadOnlyList<AccountSnapshot>? _accountExampleSnapshots;
+    private LocalOrderLifecycleExampleSession? _orderLifecycleExampleSession;
+    private bool _accountExampleLoading;
 
     internal MainWindow(
         SettingsStore settingsStore,
@@ -59,7 +63,8 @@ public partial class MainWindow : Window
         RecoveryCoordinator? recoveryCoordinator = null,
         NotificationDispatcher? notificationDispatcher = null,
         TelegramCredentialStore? telegramCredentialStore = null,
-        string? processRecoveryStatus = null)
+        string? processRecoveryStatus = null,
+        Func<LocalOrderLifecycleExampleSession>? orderLifecycleExampleFactory = null)
     {
         InitializeComponent();
         _settingsStore = settingsStore;
@@ -75,20 +80,26 @@ public partial class MainWindow : Window
         _recoveryCoordinator = recoveryCoordinator;
         _notificationDispatcher = notificationDispatcher;
         _telegramCredentialStore = telegramCredentialStore;
+        _orderLifecycleExampleFactory = orderLifecycleExampleFactory
+            ?? (() => new LocalOrderLifecycleExampleSession());
         _wakeProtection.StateChanged += UpdatePowerStatusFromController;
         if (_recoveryCoordinator is not null)
             _recoveryCoordinator.StatusChanged += UpdateRecoveryStatusFromCoordinator;
         _appliedPreventSleep = _savedProfile.Settings.PreventSleep;
         SimulationContent.StartRequested += (_, _) => SimulationContent.Start(
             SimulationNotificationPreferences.Capture(_savedProfile.Settings));
-        AccountDashboardPage.ShowExampleRequested += (_, _) => ShowAccountExample();
+        AccountDashboardPage.ShowExampleRequested += async (_, _) => await ShowAccountExampleAsync();
         AccountDashboardPage.ExitExampleRequested += (_, _) => ExitAccountExample();
+        AccountDashboardPage.ContinueWithOwnerParametersRequested += async (_, _) =>
+            await ApplyLocalOrderChoiceAsync(continuing: true);
+        AccountDashboardPage.TransferToManualRequested += async (_, _) =>
+            await ApplyLocalOrderChoiceAsync(continuing: false);
         AccountDashboardPage.HistoryRequested += (_, _) =>
         {
             NavigationList.SelectedIndex = 4;
             FocusAccountControl(AccountHistoryPage.BackButton);
         };
-        AccountHistoryPage.ShowExampleRequested += (_, _) => ShowAccountExample();
+        AccountHistoryPage.ShowExampleRequested += async (_, _) => await ShowAccountExampleAsync();
         AccountHistoryPage.ExitExampleRequested += (_, _) => ExitAccountExample();
         AccountHistoryPage.BackToOverviewRequested += (_, _) =>
         {
@@ -114,11 +125,18 @@ public partial class MainWindow : Window
         ShowLoadStatus();
     }
 
-    internal void AllowApplicationClose() => _allowClose = true;
+    internal LocalOrderLifecycleExampleSession? OrderLifecycleExampleSession => _orderLifecycleExampleSession;
+
+    internal void AllowApplicationClose()
+    {
+        _allowClose = true;
+        DisposeOrderLifecycleExample();
+    }
 
     internal void PrepareForApplicationClose()
     {
         _applicationClosing = true;
+        DisposeOrderLifecycleExample();
         _aiBatchCancellation?.Cancel();
         _trueNorthSessionAttempt++;
         UpdateTrueNorthSessionCard();
@@ -247,13 +265,34 @@ public partial class MainWindow : Window
 
     private void Navigation_SelectionChanged(object sender, SelectionChangedEventArgs e) => UpdatePage();
 
-    private void ShowAccountExample()
+    private async Task ShowAccountExampleAsync()
     {
+        if (_accountExampleLoading || _orderLifecycleExampleSession is not null)
+            return;
+        _accountExampleLoading = true;
         _accountExampleSnapshots = AccountExample.Create();
         AccountDashboardPage.SetSnapshots(_accountExampleSnapshots);
         AccountDashboardPage.SetEntryEligibilityResult(EntryEligibilityExample.Evaluate());
         AccountHistoryPage.SetSnapshots(_accountExampleSnapshots);
         UpdateAccountTestDataBadge();
+        var exampleSession = _orderLifecycleExampleFactory();
+        _orderLifecycleExampleSession = exampleSession;
+        try
+        {
+            var result = await exampleSession.InitializeAsync();
+            if (ReferenceEquals(_orderLifecycleExampleSession, exampleSession))
+                AccountDashboardPage.SetOrderLifecycleExample(exampleSession.CreatePresentation(result));
+        }
+        catch (Exception)
+        {
+            if (ReferenceEquals(_orderLifecycleExampleSession, exampleSession))
+                AccountDashboardPage.SetOrderLifecycleExample(exampleSession.CreatePresentation(
+                    new OrderLifecycleResult(false, "Локальное намерение не удалось загрузить из примера.")));
+        }
+        finally
+        {
+            _accountExampleLoading = false;
+        }
         FocusAccountControl(NavigationList.SelectedIndex == 4
             ? AccountHistoryPage.BackButton
             : AccountDashboardPage.OpenHistoryButton);
@@ -261,7 +300,9 @@ public partial class MainWindow : Window
 
     private void ExitAccountExample()
     {
+        DisposeOrderLifecycleExample();
         _accountExampleSnapshots = null;
+        AccountDashboardPage.SetOrderLifecycleExample(null);
         AccountDashboardPage.SetEntryEligibilityResult(null);
         AccountDashboardPage.SetSnapshots(null);
         AccountHistoryPage.SetSnapshots(null);
@@ -269,6 +310,30 @@ public partial class MainWindow : Window
         FocusAccountControl(NavigationList.SelectedIndex == 4
             ? AccountHistoryPage.ExampleButton
             : AccountDashboardPage.ExampleButton);
+    }
+
+    private async Task ApplyLocalOrderChoiceAsync(bool continuing)
+    {
+        var exampleSession = _orderLifecycleExampleSession;
+        if (exampleSession is null)
+            return;
+        AccountDashboardPage.ContinueOwnerParametersButton.IsEnabled = false;
+        AccountDashboardPage.TransferToManualButton.IsEnabled = false;
+        var result = continuing
+            ? await exampleSession.ContinueWithOwnerParametersAsync()
+            : await exampleSession.TransferToManualAsync();
+        if (ReferenceEquals(_orderLifecycleExampleSession, exampleSession))
+        {
+            AccountDashboardPage.SetOrderLifecycleExample(exampleSession.CreatePresentation(result));
+            AccountDashboardPage.OrderLifecyclePanelElement.BringIntoView();
+        }
+    }
+
+    private void DisposeOrderLifecycleExample()
+    {
+        var exampleSession = _orderLifecycleExampleSession;
+        _orderLifecycleExampleSession = null;
+        exampleSession?.Dispose();
     }
 
     private void FocusAccountControl(System.Windows.Controls.Control control)

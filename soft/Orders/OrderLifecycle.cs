@@ -17,7 +17,15 @@ internal enum ManagedOrderStatus
     EmergencyClosePaused,
     Cancelled,
     Closed,
-    OwnershipAmbiguous
+    OwnershipAmbiguous,
+    OwnerDecisionRequired
+}
+
+internal enum ManagedOrderManagementMode
+{
+    Application,
+    AwaitingOwnerChoice,
+    Manual
 }
 
 internal enum ManagedEntryTerminalState
@@ -71,6 +79,7 @@ internal sealed record ManagedOrderState(
     bool EmergencyCloseNoticeSent = false,
     bool EmergencyCloseNoticePending = false,
     string? LastFailure = null,
+    bool OwnerParametersAccepted = false,
     decimal TakeProfitClosedQuantity = 0m,
     decimal StopLossClosedQuantity = 0m,
     decimal? LastFailedProtectionQuantity = null,
@@ -78,7 +87,21 @@ internal sealed record ManagedOrderState(
     RecoveryRetryability EmergencyCloseRetryability = RecoveryRetryability.Unknown,
     ManagedOrderStatus? PendingPriorStatus = null,
     string? LastAppliedOperationId = null,
-    long Revision = 0)
+    long Revision = 0,
+    DateTimeOffset? FirstPartialFillAt = null,
+    DateTimeOffset? PartialFillCancelAt = null,
+    bool PartialFillCancelAttempted = false,
+    DateTimeOffset? NextManagementCheckAt = null,
+    ManagedOrderManagementMode ManagementMode = ManagedOrderManagementMode.Application,
+    decimal? PendingOwnerTakeProfit = null,
+    decimal? PendingOwnerStopLoss = null,
+    string? PendingOwnerTakeProfitOrderId = null,
+    string? PendingOwnerStopLossOrderId = null,
+    DateTimeOffset? ManagementTransferredAt = null,
+    decimal? TransferredPositionQuantity = null,
+    decimal? TransferredRemainderQuantity = null,
+    string? OriginEntryOperationId = null,
+    string? OwnerDecisionNotificationId = null)
 {
     internal static RecoveryActionKind RecoveryKind(ManagedOrderAction action) => action switch
     {
@@ -97,6 +120,7 @@ internal sealed record ManagedOrderState(
         && !string.IsNullOrWhiteSpace(state.Contract)
         && Enum.IsDefined(state.Direction)
         && Enum.IsDefined(state.EntryTerminalState)
+        && Enum.IsDefined(state.ManagementMode)
         && Enum.IsDefined(state.EmergencyCloseRetryability)
         && state.EntryType is "Market" or "Limit"
         && state.Quantity > 0m
@@ -130,6 +154,8 @@ internal sealed record ManagedOrderState(
         && state.TakeProfitClosedQuantity >= 0m && state.StopLossClosedQuantity >= 0m
         && (state.LastFailedProtectionQuantity is null || state.LastFailedProtectionQuantity >= 0m)
         && state.Revision >= 0
+        && (state.OriginEntryOperationId is null
+            || state.OriginEntryOperationId.StartsWith(state.IntentId + ":entry:", StringComparison.Ordinal))
         && ((state.PendingOperationId is null) == (state.PendingAction is null))
         && (state.PendingOperationId is null || state.Status == ManagedOrderStatus.ReconciliationRequired)
         && ((state.PendingOperationId is null) == (state.PendingPriorStatus is null))
@@ -138,7 +164,26 @@ internal sealed record ManagedOrderState(
         && (state.PendingOperationId is not null || state.PendingQuantity is null)
         && (state.NextEmergencyCloseAt is null || state.Status == ManagedOrderStatus.EmergencyCloseWaiting
             || state.Status == ManagedOrderStatus.ReconciliationRequired
-                && state.PendingAction == ManagedOrderAction.EmergencyClose);
+                && state.PendingAction == ManagedOrderAction.EmergencyClose)
+        && (state.FirstPartialFillAt is null || state.FirstPartialFillAt >= state.CreatedAt)
+        && (state.PartialFillCancelAt is null || state.FirstPartialFillAt is { } firstFill
+            && state.PartialFillCancelAt >= firstFill)
+        && (state.NextManagementCheckAt is null || state.NextManagementCheckAt >= state.CreatedAt)
+        && (state.ManagementMode == ManagedOrderManagementMode.AwaitingOwnerChoice
+            ? (state.PendingOwnerTakeProfit is null && state.PendingOwnerStopLoss is null
+                && state.PendingOwnerTakeProfitOrderId is null && state.PendingOwnerStopLossOrderId is null)
+                || (state.PendingOwnerTakeProfit is > 0m && state.PendingOwnerStopLoss is > 0m
+                    && !string.IsNullOrWhiteSpace(state.PendingOwnerTakeProfitOrderId)
+                    && !string.IsNullOrWhiteSpace(state.PendingOwnerStopLossOrderId))
+            : state.PendingOwnerTakeProfit is null && state.PendingOwnerStopLoss is null
+                && state.PendingOwnerTakeProfitOrderId is null && state.PendingOwnerStopLossOrderId is null)
+        && (state.ManagementMode == ManagedOrderManagementMode.Manual
+            ? state.ManagementTransferredAt is not null
+                && state.TransferredPositionQuantity is >= 0m
+                && state.TransferredRemainderQuantity is >= 0m
+                && state.TransferredPositionQuantity + state.TransferredRemainderQuantity <= state.Quantity
+            : state.ManagementTransferredAt is null
+                && state.TransferredPositionQuantity is null && state.TransferredRemainderQuantity is null);
 
     internal static bool BlocksNewEntry(ManagedOrderState state) => state.Status is not
         (ManagedOrderStatus.EntryRejected or ManagedOrderStatus.Cancelled or ManagedOrderStatus.Closed);
@@ -328,6 +373,29 @@ internal sealed class OrderLifecycleCoordinator
         ExecuteSeriallyAsync(cancellationToken,
             () => CancelRemainderCoreAsync(intentId, savedOperatingIntent, cancellationToken));
 
+    internal Task<OrderLifecycleResult> RunDueChecksAsync(
+        string intentId,
+        bool savedOperatingIntent = false,
+        CancellationToken cancellationToken = default) =>
+        ExecuteSeriallyAsync(cancellationToken,
+            () => RunDueChecksCoreAsync(intentId, savedOperatingIntent, cancellationToken));
+
+    internal Task<OrderLifecycleResult> ContinueWithOwnerParametersAsync(
+        string intentId,
+        bool savedOperatingIntent = false,
+        CancellationToken cancellationToken = default) =>
+        ExecuteSeriallyAsync(cancellationToken,
+            () => ContinueWithOwnerParametersCoreAsync(intentId, savedOperatingIntent, cancellationToken));
+
+    internal Task<OrderLifecycleResult> TransferToManualAsync(
+        string intentId,
+        CancellationToken cancellationToken = default) =>
+        ExecuteSeriallyAsync(cancellationToken,
+            () => TransferToManualCoreAsync(intentId, cancellationToken));
+
+    internal Task<OrderLifecycleResult> StopAsync(CancellationToken cancellationToken = default) =>
+        ExecuteSeriallyAsync(cancellationToken, () => StopCoreAsync(cancellationToken));
+
     private async Task<OrderLifecycleResult> CancelRemainderCoreAsync(
         string intentId,
         bool savedOperatingIntent,
@@ -335,6 +403,8 @@ internal sealed class OrderLifecycleCoordinator
         bool repairAfterCancel = true)
     {
         var state = Find(intentId);
+        if (state?.ManagementMode == ManagedOrderManagementMode.Manual)
+            return Blocked("Заявка передана владельцу; приложение не изменяет её.", intentId);
         if (state is null || state.EntryOrderId is null)
             return Blocked("Точная заявка приложения не найдена.", intentId);
         var result = await RunActionAsync(state, ManagedOrderAction.CancelRemainder,
@@ -350,7 +420,12 @@ internal sealed class OrderLifecycleCoordinator
         {
             var currentPosition = result.Read is null ? null
                 : FindOwnedPosition(result.Read.Account!, updated, out _);
-            if (repairAfterCancel && currentPosition is not null
+            if (updated.ManagementMode == ManagedOrderManagementMode.AwaitingOwnerChoice
+                && updated.FilledQuantity > state.FilledQuantity && currentPosition is not null)
+                return await RepairProtectionCoreAsync(updated, savedOperatingIntent: false, cancellationToken,
+                    repairOwnerAfterFill: true).ConfigureAwait(false);
+            if (repairAfterCancel && updated.ManagementMode == ManagedOrderManagementMode.Application
+                && currentPosition is not null
                 && !ProtectionComplete(result.Read!.Account!, updated, currentPosition))
             {
                 var repaired = await RepairProtectionCoreAsync(updated with
@@ -367,7 +442,12 @@ internal sealed class OrderLifecycleCoordinator
             var position = FindOwnedPosition(result.Read!.Account!, updated, out _);
             await NotifyAsync(updated.IntentId + ":filled", NotificationCategory.OrderChange,
                 "Остаток заявки исполнился до отмены; полный объём сверён.", cancellationToken).ConfigureAwait(false);
-            if (position is not null && !ProtectionComplete(result.Read.Account!, updated, position))
+            if (updated.ManagementMode == ManagedOrderManagementMode.AwaitingOwnerChoice
+                && updated.FilledQuantity > state.FilledQuantity && position is not null)
+                return await RepairProtectionCoreAsync(updated, savedOperatingIntent: false, cancellationToken,
+                    repairOwnerAfterFill: true).ConfigureAwait(false);
+            if (position is not null && updated.ManagementMode == ManagedOrderManagementMode.Application
+                && !ProtectionComplete(result.Read.Account!, updated, position))
                 return await RepairProtectionCoreAsync(updated with { Status = ManagedOrderStatus.PositionUnprotected },
                     savedOperatingIntent: false, cancellationToken).ConfigureAwait(false);
             return new(true, "Заявка полностью исполнилась во время отмены; объём позиции сверен.", intentId);
@@ -380,13 +460,397 @@ internal sealed class OrderLifecycleCoordinator
             "Остаток заявки отменён и сверён.", cancellationToken).ConfigureAwait(false);
 
         var remainingPosition = FindOwnedPosition(result.Read!.Account!, updated, out _);
-        if (repairAfterCancel && remainingPosition is not null
+        if (updated.ManagementMode == ManagedOrderManagementMode.AwaitingOwnerChoice
+            && updated.FilledQuantity > state.FilledQuantity && remainingPosition is not null)
+            return await RepairProtectionCoreAsync(updated, savedOperatingIntent: false, cancellationToken,
+                repairOwnerAfterFill: true).ConfigureAwait(false);
+        if (repairAfterCancel && updated.ManagementMode == ManagedOrderManagementMode.Application
+            && remainingPosition is not null
             && !ProtectionComplete(result.Read.Account!, updated, remainingPosition))
             return await RepairProtectionCoreAsync(updated with { Status = ManagedOrderStatus.PositionUnprotected },
                 savedOperatingIntent: false, cancellationToken).ConfigureAwait(false);
         return new(true, remainingPosition is null
             ? "Остаток отменён; частично исполненная позиция по TP/SL закрыта и подтверждена."
             : "Остаток отменён и сверён.", intentId);
+    }
+
+    private async Task<OrderLifecycleResult> RunDueChecksCoreAsync(
+        string intentId,
+        bool savedOperatingIntent,
+        CancellationToken cancellationToken)
+    {
+        var state = Find(intentId);
+        if (state is null)
+            return Blocked("Намерение не найдено.", intentId);
+        if (state.PendingOperationId is not null)
+        {
+            await ReconcilePendingCoreAsync(intentId, cancellationToken).ConfigureAwait(false);
+            state = Find(intentId);
+            if (state is null || state.PendingOperationId is not null)
+                return Blocked("Сначала нужно сверить уже отправленное действие.", intentId);
+        }
+        if (state.ManagementMode == ManagedOrderManagementMode.Manual)
+            return Blocked("Позиция и остаток переданы владельцу; действий приложения нет.", intentId);
+        if (state.Status == ManagedOrderStatus.EmergencyCloseWaiting
+            && state.NextEmergencyCloseAt is { } emergencyDue && emergencyDue <= _clock.UtcNow)
+            return await RunDueEmergencyCloseCoreAsync(intentId, savedOperatingIntent: false, cancellationToken)
+                .ConfigureAwait(false);
+
+        var partialWithoutDeadline = state.EntryTerminalState == ManagedEntryTerminalState.Open
+            && state.FilledQuantity > 0m && state.FirstPartialFillAt is null;
+        var cancelDue = state.PartialFillCancelAt is { } cancelAt && cancelAt <= _clock.UtcNow;
+        var checkDue = state.NextManagementCheckAt is null || state.NextManagementCheckAt <= _clock.UtcNow;
+        if (!partialWithoutDeadline && !cancelDue && !checkDue)
+            return new(false, "Проверка ещё не наступила.", intentId);
+
+        var read = await ReadFreshAsync(state, cancellationToken).ConfigureAwait(false);
+        if (read is null || !TryReadStateProgress(state, read, out var progress))
+            return await PauseForLifecycleReconciliationAsync(state,
+                "Свежая сверка не подтвердила точный остаток, позицию и их владельца.", cancellationToken)
+                .ConfigureAwait(false);
+
+        var priorFilled = state.FilledQuantity;
+        var priorStatus = state.Status;
+        if (state.ManagementMode == ManagedOrderManagementMode.Application
+            && TryCaptureOwnerChange(state, progress, read.Account!, out var ownerDecision))
+            state = ownerDecision!;
+
+        var updated = ApplyFillProgress(state, progress);
+        var saved = await SaveAsync(updated, cancellationToken).ConfigureAwait(false);
+        if (saved is null)
+            return Blocked("Сверенное состояние заявки не сохранилось.", intentId);
+        state = saved;
+        await NotifyOwnerChoiceIfNeededAsync(state, cancellationToken).ConfigureAwait(false);
+        if (priorFilled == 0m && progress.Filled > 0m)
+            await NotifyAsync(state.IntentId + ":opened", NotificationCategory.Opening,
+                "Открытие подтверждено; состояние позиции сверено.", cancellationToken).ConfigureAwait(false);
+        if (priorStatus != ManagedOrderStatus.Closed && progress.Position is null && progress.Filled > 0m
+            && progress.TakeProfitClosed + progress.StopLossClosed == progress.Filled)
+            await NotifyAsync(state.IntentId + ":closed", NotificationCategory.Closing,
+                "Закрытие подтверждено по истории TP/SL.", cancellationToken).ConfigureAwait(false);
+
+        var firstFillUnknown = progress.Filled > 0m && progress.EntryRemainder > 0m
+            && state.FirstPartialFillAt is null;
+        var takeProfitClosed = progress.Filled > 0m && progress.Position is null
+            && progress.TakeProfitClosed > 0m;
+        var stopLossClosed = progress.Filled > 0m && progress.Position is null
+            && progress.StopLossClosed > 0m;
+
+        var ownerFillProtected = false;
+        if (state.ManagementMode == ManagedOrderManagementMode.AwaitingOwnerChoice
+            && progress.Filled > priorFilled && progress.Position is not null
+            && state.PendingOwnerTakeProfit is not null && state.PendingOwnerStopLoss is not null)
+        {
+            var repair = await RepairProtectionCoreAsync(state, savedOperatingIntent: false,
+                cancellationToken, repairOwnerAfterFill: true).ConfigureAwait(false);
+            state = Find(intentId) ?? state;
+            ownerFillProtected = true;
+            if (state.PendingOperationId is not null
+                || state.Status is ManagedOrderStatus.EmergencyCloseWaiting
+                    or ManagedOrderStatus.EmergencyClosePaused or ManagedOrderStatus.Closed)
+                return repair;
+        }
+
+        if (progress.EntryRemainder > 0m
+            && (firstFillUnknown || state.PartialFillCancelAt is { } deadline && deadline <= _clock.UtcNow
+                || takeProfitClosed || stopLossClosed))
+        {
+            if (state.PartialFillCancelAttempted)
+                return Blocked("Точная отмена уже отправлялась; автоматический повтор заблокирован.", intentId);
+            state = await SaveFailureNoteAsync(state,
+                firstFillUnknown
+                    ? "Время первого исполнения не подтверждено; отменяется только свежесверенный остаток."
+                    : takeProfitClosed || stopLossClosed
+                        ? "Исполненная часть закрылась по TP/SL; отменяется открытый остаток."
+                        : "Срок частичного исполнения истёк; отменяется открытый остаток.", cancellationToken)
+                .ConfigureAwait(false) ?? state;
+            return await CancelRemainderCoreAsync(intentId, savedOperatingIntent, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        if (state.Status is ManagedOrderStatus.EmergencyCloseWaiting or ManagedOrderStatus.EmergencyClosePaused)
+            return Blocked(state.Status == ManagedOrderStatus.EmergencyCloseWaiting
+                ? "Аварийное закрытие ожидает сохранённого срока повтора."
+                : "Аварийное закрытие приостановлено; требуется ручное восстановление.", intentId);
+
+        if (state.ManagementMode == ManagedOrderManagementMode.AwaitingOwnerChoice)
+        {
+            if (state.PendingOwnerTakeProfit is null || state.PendingOwnerStopLoss is null)
+                return await PauseForLifecycleReconciliationAsync(state,
+                    state.LastFailure ?? "Новые TP/SL владельца отсутствуют или неоднозначны.", cancellationToken)
+                    .ConfigureAwait(false);
+            if (ownerFillProtected)
+                return Blocked("Увеличившаяся позиция сверена по TP/SL владельца; решение о сопровождении остаётся открытым.",
+                    intentId);
+            return Blocked("Ручное изменение обнаружено; продолжить сопровождение или передать управление.",
+                intentId);
+        }
+
+        if (progress.Position is null)
+        {
+            if (HasVerifiedPositionClosure(progress))
+            {
+                var closedPosition = await SaveAsync(state, cancellationToken).ConfigureAwait(false);
+                return closedPosition is null
+                    ? Blocked("Сверенное закрытие позиции перед отменой не сохранилось.", state.IntentId)
+                    : await CancelRemainderCoreAsync(state.IntentId, savedOperatingIntent: false, cancellationToken)
+                        .ConfigureAwait(false);
+            }
+            if (progress.Filled > 0m && progress.EntryRemainder == 0m)
+            {
+                var closed = await SaveAsync(state with { Status = ManagedOrderStatus.Closed }, cancellationToken)
+                    .ConfigureAwait(false);
+                return closed is null
+                    ? Blocked("Закрытая позиция не сохранилась.", intentId)
+                    : new(true, "Позиция закрыта по подтверждённым TP/SL.", intentId);
+            }
+            return new(true, "Открытая заявка сверена.", intentId);
+        }
+
+        if (!ProtectionComplete(read.Account!, state, progress.Position))
+            return await RepairProtectionCoreAsync(state, savedOperatingIntent, cancellationToken)
+                .ConfigureAwait(false);
+
+        return new(true, "Заявка, позиция и защита сверены.", intentId);
+    }
+
+    private async Task<OrderLifecycleResult> ContinueWithOwnerParametersCoreAsync(
+        string intentId,
+        bool savedOperatingIntent,
+        CancellationToken cancellationToken)
+    {
+        var state = Find(intentId);
+        if (state?.ManagementMode != ManagedOrderManagementMode.AwaitingOwnerChoice)
+            return Blocked("Нет ожидающего решения владельца.", intentId);
+        if (state.PendingOperationId is not null)
+        {
+            await ReconcilePendingCoreAsync(intentId, cancellationToken).ConfigureAwait(false);
+            state = Find(intentId);
+            if (state?.ManagementMode != ManagedOrderManagementMode.AwaitingOwnerChoice
+                || state.PendingOperationId is not null)
+                return Blocked("Сначала нужно сверить отправленное действие.", intentId);
+        }
+        if (state.PendingOwnerTakeProfit is not { } takeProfit
+            || state.PendingOwnerStopLoss is not { } stopLoss
+            || state.PendingOwnerTakeProfitOrderId is not { } takeProfitOrderId
+            || state.PendingOwnerStopLossOrderId is not { } stopLossOrderId)
+            return await PauseForLifecycleReconciliationAsync(state,
+                "TP/SL владельца отсутствуют или неоднозначны; продолжение невозможно.", cancellationToken)
+                .ConfigureAwait(false);
+
+        var read = await ReadFreshAsync(state, cancellationToken).ConfigureAwait(false);
+        if (read is null || !TryReadStateProgress(state, read, out var progress))
+            return await PauseForLifecycleReconciliationAsync(state,
+                "Свежая сверка не подтвердила точную позицию для принятия параметров.", cancellationToken)
+                .ConfigureAwait(false);
+        if (progress.Position is null)
+        {
+            if (HasVerifiedPositionClosure(progress))
+            {
+                var closedPosition = await SaveAsync(ApplyFillProgress(state, progress), cancellationToken)
+                    .ConfigureAwait(false);
+                return closedPosition is null
+                    ? Blocked("Сверенное закрытие позиции перед отменой не сохранилось.", intentId)
+                    : await CancelRemainderCoreAsync(intentId, savedOperatingIntent: false, cancellationToken)
+                        .ConfigureAwait(false);
+            }
+            return await PauseForLifecycleReconciliationAsync(state,
+                "Открытая позиция для принятия TP/SL не подтверждена.", cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        var protection = progress.Protection;
+        if (!OwnerProtectionMatches(protection, takeProfit, stopLoss, takeProfitOrderId, stopLossOrderId,
+                read.Account!.QuoteCurrency))
+        {
+            var hasChangedProtection = TryReadOwnerProtection(protection, read.Account!.QuoteCurrency,
+                out var changed);
+            var updated = hasChangedProtection
+                ? state with
+                {
+                    PendingOwnerTakeProfit = changed!.TakeProfit!.Value,
+                    PendingOwnerStopLoss = changed.StopLoss!.Value,
+                    PendingOwnerTakeProfitOrderId = changed.TakeProfitOrderId,
+                    PendingOwnerStopLossOrderId = changed.StopLossOrderId,
+                    OwnerDecisionNotificationId = NewOwnerDecisionNotificationId(state.IntentId),
+                    LastFailure = "Параметры изменились после показа решения; повторно проверьте уровни."
+                }
+                : state with
+                {
+                    PendingOwnerTakeProfit = null,
+                    PendingOwnerStopLoss = null,
+                    PendingOwnerTakeProfitOrderId = null,
+                    PendingOwnerStopLossOrderId = null,
+                    LastFailure = "TP/SL владельца изменились или стали недоступны; нужна сверка."
+                };
+            var savedChanged = await SaveAsync(updated with
+            {
+                Status = hasChangedProtection ? ManagedOrderStatus.OwnerDecisionRequired
+                    : ManagedOrderStatus.ReconciliationRequired
+            },
+                cancellationToken).ConfigureAwait(false);
+            if (savedChanged is null)
+                return Blocked("Обновлённые параметры владельца не сохранились.", intentId);
+            await NotifyOwnerChoiceIfNeededAsync(savedChanged, cancellationToken).ConfigureAwait(false);
+            return Blocked(savedChanged.LastFailure!, intentId);
+        }
+
+        var accepted = ApplyFillProgress(state with
+        {
+            TakeProfit = takeProfit,
+            StopLoss = stopLoss,
+            TakeProfitOrderId = progress.Protection!.TakeProfitOrderId,
+            StopLossOrderId = progress.Protection.StopLossOrderId,
+            TakeProfitCoveredQuantity = progress.Protection.TakeProfitCoveredQuantity ?? 0m,
+            StopLossCoveredQuantity = progress.Protection.StopLossCoveredQuantity ?? 0m,
+            OwnerParametersAccepted = true,
+            ManagementMode = ManagedOrderManagementMode.Application,
+            PendingOwnerTakeProfit = null,
+            PendingOwnerStopLoss = null,
+            PendingOwnerTakeProfitOrderId = null,
+            PendingOwnerStopLossOrderId = null,
+            LastFailure = null
+        }, progress);
+        var savedAccepted = await SaveAsync(accepted, cancellationToken).ConfigureAwait(false);
+        if (savedAccepted is null)
+            return Blocked("Принятые уровни владельца не сохранились.", intentId);
+
+        if (!ProtectionComplete(read.Account!, savedAccepted, progress.Position))
+            return await RepairProtectionCoreAsync(savedAccepted, savedOperatingIntent, cancellationToken)
+                .ConfigureAwait(false);
+
+        var protectedState = await SaveAsync(savedAccepted with { Status = ManagedOrderStatus.Protected },
+            cancellationToken).ConfigureAwait(false);
+        return protectedState is null
+            ? Blocked("Принятые уровни подтвердились, но состояние не сохранилось.", intentId)
+            : new(true, "Новые TP/SL владельца приняты после свежей сверки.", intentId);
+    }
+
+    private async Task<OrderLifecycleResult> TransferToManualCoreAsync(
+        string intentId,
+        CancellationToken cancellationToken)
+    {
+        var state = Find(intentId);
+        if (state is null)
+            return Blocked("Намерение не найдено.", intentId);
+        if (state.ManagementMode == ManagedOrderManagementMode.Manual)
+            return new(true, "Позиция и остаток уже переданы владельцу.", intentId);
+
+        var read = await ReadFreshAsync(state, cancellationToken).ConfigureAwait(false);
+        if (read is null || !TryReadStateProgress(state, read, out var progress))
+            return await PauseForLifecycleReconciliationAsync(state,
+                "Передача требует свежего точного состояния позиции и остатка.", cancellationToken)
+                .ConfigureAwait(false);
+
+        var takeProfit = state.PendingOwnerTakeProfit ?? progress.Protection?.TakeProfit?.Value ?? state.TakeProfit;
+        var stopLoss = state.PendingOwnerStopLoss ?? progress.Protection?.StopLoss?.Value ?? state.StopLoss;
+        var acceptedOwnerLevels = TryReadOwnerProtection(progress.Protection, read.Account!.QuoteCurrency,
+                out var ownerProtection)
+            && ownerProtection!.TakeProfit!.Value == takeProfit && ownerProtection.StopLoss!.Value == stopLoss;
+        var transferCheckState = state with
+        {
+            TakeProfit = takeProfit,
+            StopLoss = stopLoss,
+            TakeProfitOrderId = progress.Protection?.TakeProfitOrderId ?? state.TakeProfitOrderId,
+            StopLossOrderId = progress.Protection?.StopLossOrderId ?? state.StopLossOrderId,
+            OwnerParametersAccepted = acceptedOwnerLevels || state.OwnerParametersAccepted,
+            ManagementMode = ManagedOrderManagementMode.Manual,
+            PendingOwnerTakeProfit = null,
+            PendingOwnerStopLoss = null,
+            PendingOwnerTakeProfitOrderId = null,
+            PendingOwnerStopLossOrderId = null
+        };
+        var transferred = ApplyFillProgress(state, progress) with
+        {
+            TakeProfit = takeProfit,
+            StopLoss = stopLoss,
+            TakeProfitOrderId = transferCheckState.TakeProfitOrderId,
+            StopLossOrderId = transferCheckState.StopLossOrderId,
+            OwnerParametersAccepted = acceptedOwnerLevels || state.OwnerParametersAccepted,
+            ManagementMode = ManagedOrderManagementMode.Manual,
+            PendingOwnerTakeProfit = null,
+            PendingOwnerStopLoss = null,
+            PendingOwnerTakeProfitOrderId = null,
+            PendingOwnerStopLossOrderId = null,
+            ManagementTransferredAt = _clock.UtcNow,
+            TransferredPositionQuantity = progress.CurrentPosition,
+            TransferredRemainderQuantity = progress.EntryRemainder,
+            Status = state.PendingOperationId is not null ? ManagedOrderStatus.ReconciliationRequired
+                : progress.Position is not null
+                    ? ProtectionComplete(read.Account!, transferCheckState, progress.Position)
+                        ? ManagedOrderStatus.Protected : ManagedOrderStatus.PositionUnprotected
+                    : progress.EntryRemainder > 0m ? ManagedOrderStatus.EntryOpen : ManagedOrderStatus.Closed,
+            LastFailure = state.PendingOperationId is null
+                ? "Позиция и остаток переданы владельцу; изменение приложением отключено."
+                : "Позиция и остаток переданы владельцу; отправленное действие ожидает сверки."
+        };
+        var saved = await SaveAsync(transferred, cancellationToken).ConfigureAwait(false);
+        return saved is null
+            ? Blocked("Передача позиции и остатка одной записью не сохранилась.", intentId)
+            : new(true, "Позиция и остаток переданы владельцу одной записью журнала.", intentId);
+    }
+
+    private async Task<OrderLifecycleResult> StopCoreAsync(CancellationToken cancellationToken)
+    {
+        var results = new List<OrderLifecycleResult>();
+        foreach (var original in Orders.Where(order => ManagedOrderState.BlocksNewEntry(order)).ToArray())
+        {
+            var state = Find(original.IntentId);
+            if (state is null)
+                continue;
+            if (state.PendingOperationId is not null)
+            {
+                await ReconcilePendingCoreAsync(state.IntentId, cancellationToken).ConfigureAwait(false);
+                state = Find(state.IntentId);
+                if (state is null || state.PendingOperationId is not null)
+                {
+                    results.Add(Blocked("Остановка ждёт сверки уже отправленного действия.", original.IntentId));
+                    continue;
+                }
+            }
+            if (state.ManagementMode == ManagedOrderManagementMode.Manual)
+                continue;
+            if (state.Status == ManagedOrderStatus.EmergencyCloseWaiting)
+            {
+                results.Add(state.NextEmergencyCloseAt is { } due && due <= _clock.UtcNow
+                    ? await RunDueEmergencyCloseCoreAsync(state.IntentId, savedOperatingIntent: false,
+                        cancellationToken).ConfigureAwait(false)
+                    : Blocked("Остановка сохраняет срок ожидающего аварийного закрытия.", state.IntentId));
+                continue;
+            }
+            if (state.Status == ManagedOrderStatus.EmergencyClosePaused)
+            {
+                results.Add(Blocked("Остановка не повторяет приостановленное аварийное закрытие; требуется ручное восстановление.",
+                    state.IntentId));
+                continue;
+            }
+
+            var read = await ReadFreshAsync(state, cancellationToken).ConfigureAwait(false);
+            if (read is null || !TryReadStateProgress(state, read, out var progress))
+            {
+                results.Add(await PauseForLifecycleReconciliationAsync(state,
+                    "Остановка не подтверждает точный остаток и владельца позиции.", cancellationToken)
+                    .ConfigureAwait(false));
+                continue;
+            }
+            var saved = await SaveAsync(ApplyFillProgress(state, progress), cancellationToken)
+                .ConfigureAwait(false);
+            if (saved is null)
+            {
+                results.Add(Blocked("Состояние остановки не сохранилось.", state.IntentId));
+                continue;
+            }
+            state = saved;
+            if (progress.EntryRemainder > 0m)
+                results.Add(await CancelRemainderCoreAsync(state.IntentId, savedOperatingIntent: false,
+                    cancellationToken).ConfigureAwait(false));
+            else if (progress.Position is not null
+                && state.ManagementMode == ManagedOrderManagementMode.Application)
+                results.Add(await RepairProtectionCoreAsync(state, savedOperatingIntent: false, cancellationToken)
+                    .ConfigureAwait(false));
+        }
+        return results.FirstOrDefault(result => !result.Succeeded)
+            ?? new(true, "Точные остатки отменены; открытые позиции сверены и защищены.");
     }
 
     internal Task<OrderLifecycleResult> RepairProtectionAsync(
@@ -420,6 +884,8 @@ internal sealed class OrderLifecycleCoordinator
         CancellationToken cancellationToken)
     {
         var state = Find(intentId);
+        if (state?.ManagementMode == ManagedOrderManagementMode.Manual)
+            return Blocked("Позиция передана владельцу; приложение не выполняет закрытие.", intentId);
         if (state is { EmergencyCloseNoticePending: true })
             state = await EnsureEmergencyCloseNoticeAsync(state, cancellationToken).ConfigureAwait(false);
         if (state is null || state.Status != ManagedOrderStatus.EmergencyCloseWaiting
@@ -564,6 +1030,8 @@ internal sealed class OrderLifecycleCoordinator
                 PendingAction = null,
                 PendingQuantity = null,
                 Status = state.PendingPriorStatus ?? ManagedOrderStatus.IntentSaved,
+                PartialFillCancelAttempted = state.PendingAction == ManagedOrderAction.CancelRemainder
+                    ? false : state.PartialFillCancelAttempted,
                 PendingPriorStatus = null,
                 LastFailure = "Процесс перезапустился до участка передачи."
             };
@@ -590,8 +1058,11 @@ internal sealed class OrderLifecycleCoordinator
     private async Task<OrderLifecycleResult> RepairProtectionCoreAsync(
         ManagedOrderState state,
         bool savedOperatingIntent,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool repairOwnerAfterFill = false)
     {
+        if (state.ManagementMode == ManagedOrderManagementMode.Manual)
+            return Blocked("Позиция передана владельцу; приложение не меняет TP/SL.", state.IntentId);
         if (state.Status is ManagedOrderStatus.EntryRejected or ManagedOrderStatus.Cancelled
             or ManagedOrderStatus.Closed)
             return Blocked("Для завершённого намерения нет открытой позиции для ремонта защиты.", state.IntentId);
@@ -602,6 +1073,7 @@ internal sealed class OrderLifecycleCoordinator
         if (state.Status == ManagedOrderStatus.EmergencyClosePaused)
             return Blocked("Аварийное закрытие требует ручного восстановления.", state.IntentId);
 
+        var priorFilled = state.FilledQuantity;
         var read = await ReadFreshAsync(state, cancellationToken).ConfigureAwait(false);
         if (read is null || !TryReadStateProgress(state, read, out var progress))
         {
@@ -616,7 +1088,21 @@ internal sealed class OrderLifecycleCoordinator
                 : Blocked("Владение позицией неоднозначно; изменение заблокировано.", state.IntentId);
         }
 
+        ManagedOrderState? ownerDecision = null;
+        var ownerChangeDetected = state.ManagementMode == ManagedOrderManagementMode.Application
+            && TryCaptureOwnerChange(state, progress, read.Account!, out ownerDecision);
+        if (ownerChangeDetected)
+            state = ownerDecision!;
+        var furtherFill = progress.Filled > priorFilled;
         state = ApplyFillProgress(state, progress);
+        if (ownerChangeDetected)
+        {
+            var savedDecision = await SaveAsync(state, cancellationToken).ConfigureAwait(false);
+            if (savedDecision is null)
+                return Blocked("Изменённые TP/SL владельца не сохранились.", state.IntentId);
+            state = savedDecision;
+            await NotifyOwnerChoiceIfNeededAsync(state, cancellationToken).ConfigureAwait(false);
+        }
         if (progress.Position is null)
         {
             if (progress.Filled > 0m && progress.EntryRemainder == 0m)
@@ -635,11 +1121,34 @@ internal sealed class OrderLifecycleCoordinator
         }
 
         var position = progress.Position;
+        if (state.ManagementMode == ManagedOrderManagementMode.AwaitingOwnerChoice)
+        {
+            if (state.PendingOwnerTakeProfit is not { } ownerTakeProfit
+                || state.PendingOwnerStopLoss is not { } ownerStopLoss
+                || state.PendingOwnerTakeProfitOrderId is not { } ownerTakeProfitOrderId
+                || state.PendingOwnerStopLossOrderId is not { } ownerStopLossOrderId
+                || !OwnerProtectionMatches(progress.Protection, ownerTakeProfit, ownerStopLoss,
+                    ownerTakeProfitOrderId, ownerStopLossOrderId, read.Account!.QuoteCurrency))
+                return await PauseForLifecycleReconciliationAsync(state,
+                    "Для продолжения защиты TP/SL владельца не подтверждены.", cancellationToken)
+                    .ConfigureAwait(false);
+
+            if (!furtherFill && !repairOwnerAfterFill)
+            {
+                var awaiting = await SaveAsync(state with { Status = ManagedOrderStatus.OwnerDecisionRequired },
+                    cancellationToken).ConfigureAwait(false);
+                return awaiting is null
+                    ? Blocked("Ожидающее решение владельца не сохранилось.", state.IntentId)
+                    : Blocked("Ручное изменение обнаружено; выберите способ сопровождения.", state.IntentId);
+            }
+        }
+
         if (ProtectionComplete(read.Account!, state, position))
         {
             var protectedState = await SaveAsync(state with
             {
-                Status = ManagedOrderStatus.Protected,
+                Status = state.ManagementMode == ManagedOrderManagementMode.AwaitingOwnerChoice
+                    ? ManagedOrderStatus.OwnerDecisionRequired : ManagedOrderStatus.Protected,
                 PositionQuantity = position.Quantity!.Value,
                 TakeProfitOrderId = progress.Protection!.TakeProfitOrderId,
                 StopLossOrderId = progress.Protection.StopLossOrderId,
@@ -649,7 +1158,9 @@ internal sealed class OrderLifecycleCoordinator
             }, cancellationToken).ConfigureAwait(false);
             return protectedState is null
                 ? Blocked("Подтверждённая защита не сохранилась в журнале.", state.IntentId)
-                : new(true, "TP и SL уже покрывают весь фактический объём.", state.IntentId);
+                : state.ManagementMode == ManagedOrderManagementMode.AwaitingOwnerChoice
+                    ? Blocked("Новые TP/SL покрывают объём; ожидается выбор владельца.", state.IntentId)
+                    : new(true, "TP и SL уже покрывают весь фактический объём.", state.IntentId);
         }
 
         if (state.LastFailedProtectionQuantity == position.Quantity)
@@ -669,7 +1180,8 @@ internal sealed class OrderLifecycleCoordinator
             (before, operationId) =>
             {
                 var current = FindOwnedPosition(before.Account!, updated, out _)!;
-                return _adapter.SetProtectionAsync(updated, current.PositionId!, current.Quantity!.Value,
+                var protectionIntent = ProtectionIntent(updated);
+                return _adapter.SetProtectionAsync(protectionIntent, current.PositionId!, current.Quantity!.Value,
                     operationId, cancellationToken);
             },
             cancellationToken).ConfigureAwait(false);
@@ -687,6 +1199,9 @@ internal sealed class OrderLifecycleCoordinator
             return await HandleProtectionRejectedCoreAsync(result.State,
                 result.State.PendingQuantity ?? updated.PositionQuantity, result.Read!, cancellationToken)
                 .ConfigureAwait(false);
+        if (result.State.Status == ManagedOrderStatus.OwnerDecisionRequired)
+            return Blocked("Новые TP/SL покрывают увеличившуюся позицию; ожидается выбор владельца.",
+                state.IntentId);
         return Blocked("Защита позиции не подтверждена; новые действия остановлены.", state.IntentId);
     }
 
@@ -758,6 +1273,8 @@ internal sealed class OrderLifecycleCoordinator
             Status = ManagedOrderStatus.ReconciliationRequired,
             PendingOperationId = operationId,
             PendingAction = action,
+            PartialFillCancelAttempted = action == ManagedOrderAction.CancelRemainder
+                ? true : state.PartialFillCancelAttempted,
             PendingQuantity = action switch
             {
                 ManagedOrderAction.Entry => state.Quantity,
@@ -877,6 +1394,7 @@ internal sealed class OrderLifecycleCoordinator
         CancellationToken cancellationToken)
     {
         var action = state.PendingAction!.Value;
+        var priorFilled = state.FilledQuantity;
         if (!TryVerifyActionEvidence(state, action, read, observation)
             || operation.Retryability != observation.Retryability)
             return await BlockAndReconcileAsync(state,
@@ -916,6 +1434,17 @@ internal sealed class OrderLifecycleCoordinator
             && updated.EntryTerminalState == ManagedEntryTerminalState.Filled)
             await NotifyAsync(updated.IntentId + ":filled", NotificationCategory.OrderChange,
                 "Остаток заявки исполнился до отмены; полный объём сверён.", cancellationToken).ConfigureAwait(false);
+
+        if (updated.ManagementMode == ManagedOrderManagementMode.Manual)
+            return new(operation.Outcome == nameof(RecoveryOperationOutcome.Confirmed),
+                "Отправленное действие сверено после передачи; новое действие не отправлялось.",
+                state.IntentId);
+
+        if (action == ManagedOrderAction.CancelRemainder
+            && updated.ManagementMode == ManagedOrderManagementMode.AwaitingOwnerChoice
+            && updated.FilledQuantity > priorFilled && updated.PositionQuantity > 0m)
+            return await RepairProtectionCoreAsync(updated, savedOperatingIntent: false, cancellationToken,
+                repairOwnerAfterFill: true).ConfigureAwait(false);
 
         if (action == ManagedOrderAction.Protection
             && operation.Outcome == nameof(RecoveryOperationOutcome.NotExecuted))
@@ -960,7 +1489,6 @@ internal sealed class OrderLifecycleCoordinator
         RecoverySnapshotRead read,
         RecoveryOperationObservation observation)
     {
-        var account = read.Account!;
         if (observation.Outcome == RecoveryOperationOutcome.NotExecuted)
             return state with
             {
@@ -973,27 +1501,22 @@ internal sealed class OrderLifecycleCoordinator
             };
         if (!TryReadFillProgress(state, read, observation, _adapter.MaximumSnapshotAge, out var progress))
             return state with { Status = ManagedOrderStatus.OwnershipAmbiguous };
-        return state with
+        return ApplyFillProgress(state with
         {
+            PendingOperationId = null,
+            PendingAction = null,
+            PendingQuantity = null,
+            PendingPriorStatus = null,
+            OriginEntryOperationId = observation.OperationId,
             EntryOrderId = observation.OrderId,
             PositionId = observation.PositionId,
-            FilledQuantity = progress.Filled,
-            RemainingQuantity = progress.EntryRemainder,
-            PositionQuantity = progress.CurrentPosition,
             TakeProfitOrderId = progress.Protection?.TakeProfitOrderId ?? observation.TakeProfitOrderId,
             StopLossOrderId = progress.Protection?.StopLossOrderId ?? observation.StopLossOrderId,
             TakeProfitCoveredQuantity = progress.Protection?.TakeProfitCoveredQuantity ?? 0m,
             StopLossCoveredQuantity = progress.Protection?.StopLossCoveredQuantity ?? 0m,
-            TakeProfitClosedQuantity = progress.TakeProfitClosed,
-            StopLossClosedQuantity = progress.StopLossClosed,
             EntryTerminalState = observation.EntryOrderState,
-            Status = progress.Position is null
-                ? progress.Filled > 0m && progress.EntryRemainder == 0m
-                    ? ManagedOrderStatus.Closed : ManagedOrderStatus.EntryOpen
-                : ProtectionComplete(account, state, progress.Position)
-                    ? ManagedOrderStatus.Protected : ManagedOrderStatus.PositionUnprotected,
             LastFailure = null
-        };
+        }, progress);
     }
 
     private ManagedOrderState ApplyCancel(
@@ -1001,36 +1524,29 @@ internal sealed class OrderLifecycleCoordinator
         RecoverySnapshotRead read,
         RecoveryOperationObservation observation)
     {
-        var account = read.Account!;
         if (!TryReadFillProgress(state, read, observation, _adapter.MaximumSnapshotAge, out var progress))
             return state with { Status = ManagedOrderStatus.OwnershipAmbiguous };
         var cancelled = observation.EntryOrderState == ManagedEntryTerminalState.Cancelled;
         var filled = observation.EntryOrderState == ManagedEntryTerminalState.Filled;
-        return state with
+        return ApplyFillProgress(state with
         {
+            PendingOperationId = null,
+            PendingAction = null,
+            PendingQuantity = null,
+            PendingPriorStatus = null,
             EntryOrderId = observation.OrderId,
             PositionId = observation.PositionId ?? state.PositionId,
-            FilledQuantity = progress.Filled,
-            RemainingQuantity = progress.EntryRemainder,
-            PositionQuantity = progress.CurrentPosition,
             TakeProfitOrderId = progress.Protection?.TakeProfitOrderId ?? observation.TakeProfitOrderId
                 ?? state.TakeProfitOrderId,
             StopLossOrderId = progress.Protection?.StopLossOrderId ?? observation.StopLossOrderId
                 ?? state.StopLossOrderId,
             TakeProfitCoveredQuantity = progress.Protection?.TakeProfitCoveredQuantity ?? 0m,
             StopLossCoveredQuantity = progress.Protection?.StopLossCoveredQuantity ?? 0m,
-            TakeProfitClosedQuantity = progress.TakeProfitClosed,
-            StopLossClosedQuantity = progress.StopLossClosed,
             EntryTerminalState = observation.EntryOrderState,
-            Status = progress.Position is null
-                ? cancelled && progress.Filled == 0m ? ManagedOrderStatus.Cancelled
-                    : cancelled || filled ? ManagedOrderStatus.Closed : ManagedOrderStatus.EntryOpen
-                    : ProtectionComplete(account, state, progress.Position)
-                        ? ManagedOrderStatus.Protected : ManagedOrderStatus.PositionUnprotected,
             LastFailure = observation.Outcome == RecoveryOperationOutcome.NotExecuted
                 && !filled ? "Отмена не выполнена; остаток заявки остаётся открытым."
                 : null
-        };
+        }, progress);
     }
 
     private static ManagedOrderState ApplyProtection(
@@ -1061,7 +1577,9 @@ internal sealed class OrderLifecycleCoordinator
             PositionQuantity = protectedPosition?.Quantity ?? observation.PositionQuantity ?? state.PositionQuantity,
             Status = observation.Outcome == RecoveryOperationOutcome.Confirmed && protectedPosition is not null
                 && ProtectionComplete(account, state, protectedPosition)
-                    ? ManagedOrderStatus.Protected : ManagedOrderStatus.PositionUnprotected,
+                    ? state.ManagementMode == ManagedOrderManagementMode.AwaitingOwnerChoice
+                        ? ManagedOrderStatus.OwnerDecisionRequired : ManagedOrderStatus.Protected
+                    : ManagedOrderStatus.PositionUnprotected,
             LastFailure = observation.Outcome == RecoveryOperationOutcome.NotExecuted
                 ? "Восстановление TP/SL подтверждённо отклонено." : null,
             LastFailedProtectionQuantity = observation.Outcome == RecoveryOperationOutcome.NotExecuted
@@ -1088,7 +1606,9 @@ internal sealed class OrderLifecycleCoordinator
             StopLossCoveredQuantity = protection?.StopLossCoveredQuantity ?? 0m,
             Status = remaining == 0m ? ManagedOrderStatus.Closed
                 : protection is not null && ProtectionComplete(account, state, position!)
-                    ? ManagedOrderStatus.Protected : ManagedOrderStatus.PositionUnprotected,
+                    ? state.ManagementMode == ManagedOrderManagementMode.AwaitingOwnerChoice
+                        ? ManagedOrderStatus.OwnerDecisionRequired : ManagedOrderStatus.Protected
+                    : ManagedOrderStatus.PositionUnprotected,
             NextEmergencyCloseAt = null,
             LastFailure = observation.Outcome == RecoveryOperationOutcome.NotExecuted
                 ? "Аварийное закрытие не выполнено; результат ожидает решения по повтору."
@@ -1255,31 +1775,163 @@ internal sealed class OrderLifecycleCoordinator
         RecoverySnapshotRead read,
         out FillProgress progress)
     {
-        var currentPosition = read.Account?.Positions.Value?.Where(position => position.Contract == state.Contract)
-            .ToArray() ?? [];
-        var position = currentPosition.Length == 1 ? currentPosition[0] : null;
-        var observation = new RecoveryOperationObservation("lifecycle-read", state.Venue, state.Account,
-            state.Contract, "ReadManagedLifecycle", RecoveryOperationOutcome.Confirmed,
-            state.EntryOrderId, position?.PositionId ?? state.PositionId, state.Direction,
-            state.FilledQuantity, state.RemainingQuantity, position?.Quantity ?? 0m,
-            state.TakeProfitOrderId, state.StopLossOrderId, EntryOrderState: state.EntryTerminalState);
+        var account = read.Account!;
+        var matchingPositions = account.Positions.Value!.Where(position => position.Contract == state.Contract)
+            .ToArray();
+        var position = matchingPositions.Length == 1 ? matchingPositions[0] : null;
+        var matchingOrders = state.EntryOrderId is null ? [] : account.Orders.Value!
+            .Where(order => order.OrderId == state.EntryOrderId).ToArray();
+        var filled = state.FilledQuantity;
+        var remainder = state.RemainingQuantity;
+        var entryOrderState = state.EntryTerminalState;
+        RecoveryOperationObservation? terminalFill = null;
+        if (state.EntryTerminalState == ManagedEntryTerminalState.Open)
+        {
+            if (matchingOrders.Length == 1 && OwnedOrder(matchingOrders[0], state, state.EntryOrderId!)
+                && matchingOrders[0].TotalQuantity == state.Quantity
+                && matchingOrders[0].RemainingQuantity is { } currentRemainder
+                && currentRemainder > 0m
+                && matchingOrders[0].FilledQuantity >= state.FilledQuantity
+                && matchingOrders[0].FilledQuantity + currentRemainder == state.Quantity)
+            {
+                filled = matchingOrders[0].FilledQuantity;
+                remainder = currentRemainder;
+                entryOrderState = ManagedEntryTerminalState.Open;
+            }
+            else if (matchingOrders.Length == 0 && state.EntryType == "Limit"
+                && TryReadCompletedLimitFill(state, read, out terminalFill))
+            {
+                filled = state.Quantity;
+                remainder = 0m;
+                entryOrderState = ManagedEntryTerminalState.Filled;
+            }
+            else
+            {
+                progress = default!;
+                return false;
+            }
+        }
+        else if (matchingOrders.Length > 0)
+        {
+            if (matchingOrders.Length != 1 || !OwnedOrder(matchingOrders[0], state, state.EntryOrderId!)
+                || matchingOrders[0].TotalQuantity != state.Quantity
+                || matchingOrders[0].RemainingQuantity != 0m
+                || matchingOrders[0].FilledQuantity != state.FilledQuantity)
+            {
+                progress = default!;
+                return false;
+            }
+        }
+        var observation = terminalFill is null
+            ? new RecoveryOperationObservation("lifecycle-read", state.Venue, state.Account,
+                state.Contract, "ReadManagedLifecycle", RecoveryOperationOutcome.Confirmed,
+                state.EntryOrderId, position?.PositionId ?? state.PositionId, state.Direction,
+                filled, remainder, position?.Quantity ?? 0m,
+                state.TakeProfitOrderId, state.StopLossOrderId, EntryOrderState: entryOrderState,
+                FirstFillAt: state.FirstPartialFillAt)
+            : terminalFill with
+            {
+                PositionQuantity = position?.Quantity ?? 0m,
+                TakeProfitOrderId = terminalFill.TakeProfitOrderId ?? state.TakeProfitOrderId,
+                StopLossOrderId = terminalFill.StopLossOrderId ?? state.StopLossOrderId,
+                FirstFillAt = terminalFill.FirstFillAt ?? state.FirstPartialFillAt
+            };
         return TryReadFillProgress(state, read, observation, _adapter.MaximumSnapshotAge, out progress);
     }
 
-    private static ManagedOrderState ApplyFillProgress(ManagedOrderState state, FillProgress progress)
+    private bool TryReadCompletedLimitFill(
+        ManagedOrderState state,
+        RecoverySnapshotRead read,
+        out RecoveryOperationObservation? observation)
     {
-        var status = progress.Position is null
-            ? progress.Filled > 0m && progress.EntryRemainder == 0m
-                ? ManagedOrderStatus.Closed
-                : state.EntryTerminalState == ManagedEntryTerminalState.Cancelled
-                    ? ManagedOrderStatus.Cancelled
-                    : state.EntryTerminalState == ManagedEntryTerminalState.Rejected
-                        ? ManagedOrderStatus.EntryRejected : ManagedOrderStatus.EntryOpen
-            : state.Status == ManagedOrderStatus.EmergencyCloseWaiting
-                ? ManagedOrderStatus.EmergencyCloseWaiting : ManagedOrderStatus.PositionUnprotected;
+        observation = null;
+        var operations = _recovery.State.Operations;
+        var operation = state.OriginEntryOperationId is { } savedOperationId
+            ? operations.SingleOrDefault(candidate => candidate.OperationId == savedOperationId)
+            : null;
+        if (operation is null)
+        {
+            var prefix = state.IntentId + ":entry:";
+            var candidates = operations.Where(candidate => candidate.OperationId.StartsWith(prefix,
+                StringComparison.Ordinal)).ToArray();
+            if (candidates.Length != 1)
+                return false;
+            operation = candidates[0];
+        }
+
+        if (operation.ActionKind != RecoveryActionKind.Entry
+            || operation.Venue != state.Venue || operation.Account != state.Account
+            || operation.Market != state.Contract || operation.Operation != "PlaceOpeningOrder"
+            || operation.Stage is not (RecoveryOperationStage.Confirmed or RecoveryOperationStage.Reconciled)
+            || operation.Outcome != nameof(RecoveryOperationOutcome.Confirmed)
+            || read.OperationOutcomes?.TryGetValue(operation.OperationId, out observation) != true
+            || observation is null
+            || observation.OperationId != operation.OperationId
+            || observation.Venue != state.Venue || observation.Account != state.Account
+            || observation.Market != state.Contract || observation.Operation != operation.Operation
+            || observation.Outcome != RecoveryOperationOutcome.Confirmed
+            || observation.OrderId != state.EntryOrderId || observation.Direction != state.Direction
+            || observation.EntryOrderState != ManagedEntryTerminalState.Filled
+            || observation.FilledQuantity != state.Quantity || observation.RemainingQuantity != 0m
+            || observation.PositionId is null
+            || state.PositionId is not null && observation.PositionId != state.PositionId
+            || observation.PositionQuantity is not { } positionQuantity
+            || positionQuantity < 0m || positionQuantity > state.Quantity)
+        {
+            observation = null;
+            return false;
+        }
+        return true;
+    }
+
+    private ManagedOrderState ApplyFillProgress(ManagedOrderState state, FillProgress progress)
+    {
+        var now = _clock.UtcNow;
+        var firstFillAt = state.FirstPartialFillAt;
+        if (progress.Filled > 0m && progress.EntryRemainder > 0m && progress.FirstFillAt is { } observedFirstFill
+            && (firstFillAt is null || observedFirstFill < firstFillAt))
+            firstFillAt = observedFirstFill;
+        var cancelAt = state.PartialFillCancelAt;
+        if (firstFillAt is { } firstPartialFill && progress.Filled > 0m && progress.EntryRemainder > 0m)
+        {
+            var historyDeadline = firstPartialFill.AddMinutes(_settings.PartialFillCancelMinutes);
+            if (cancelAt is null || historyDeadline < cancelAt)
+                cancelAt = historyDeadline;
+        }
+        var interval = progress.EntryRemainder > 0m
+            ? _settings.LimitOrderCheckMinutes
+            : progress.Position is not null ? _settings.PositionCheckMinutes : 0;
+        var entryCompleted = state.EntryTerminalState == ManagedEntryTerminalState.Open
+            && progress.EntryTerminalState is ManagedEntryTerminalState.Cancelled or ManagedEntryTerminalState.Filled
+            && progress.EntryRemainder == 0m;
+        DateTimeOffset? nextCheckAt = progress.EntryRemainder > 0m || progress.Position is not null
+            ? entryCompleted && progress.Position is not null
+                ? now.AddMinutes(_settings.PositionCheckMinutes)
+                : state.NextManagementCheckAt is { } next && next > now
+                ? next : now.AddMinutes(interval)
+            : null;
+        if (cancelAt is { } deadline && progress.EntryRemainder > 0m
+            && (nextCheckAt is null || deadline < nextCheckAt))
+            nextCheckAt = deadline;
+        var status = state.PendingOperationId is not null ? ManagedOrderStatus.ReconciliationRequired
+            : progress.Position is null && progress.EntryRemainder == 0m
+                ? progress.Filled > 0m ? ManagedOrderStatus.Closed
+                    : progress.EntryTerminalState == ManagedEntryTerminalState.Cancelled
+                        ? ManagedOrderStatus.Cancelled : ManagedOrderStatus.EntryRejected
+            : state.Status is ManagedOrderStatus.EmergencyCloseWaiting or ManagedOrderStatus.EmergencyClosePaused
+                ? state.Status
+            : state.ManagementMode == ManagedOrderManagementMode.AwaitingOwnerChoice
+                ? state.PendingOwnerTakeProfit is not null && state.PendingOwnerStopLoss is not null
+                    ? ManagedOrderStatus.OwnerDecisionRequired : ManagedOrderStatus.ReconciliationRequired
+                : progress.Position is null
+                    ? progress.EntryTerminalState == ManagedEntryTerminalState.Cancelled
+                            ? ManagedOrderStatus.Cancelled : ManagedOrderStatus.EntryOpen
+                    : ProtectionComplete(progress.Account, state, progress.Position)
+                        ? ManagedOrderStatus.Protected : ManagedOrderStatus.PositionUnprotected;
         return state with
         {
             EntryOrderId = progress.OrderId,
+            EntryTerminalState = progress.EntryTerminalState,
             PositionId = progress.PositionId ?? state.PositionId,
             FilledQuantity = progress.Filled,
             RemainingQuantity = progress.EntryRemainder,
@@ -1290,6 +1942,13 @@ internal sealed class OrderLifecycleCoordinator
             StopLossCoveredQuantity = progress.Protection?.StopLossCoveredQuantity ?? 0m,
             TakeProfitClosedQuantity = progress.TakeProfitClosed,
             StopLossClosedQuantity = progress.StopLossClosed,
+            FirstPartialFillAt = firstFillAt,
+            PartialFillCancelAt = cancelAt,
+            NextManagementCheckAt = nextCheckAt,
+            TransferredPositionQuantity = state.ManagementMode == ManagedOrderManagementMode.Manual
+                ? progress.CurrentPosition : state.TransferredPositionQuantity,
+            TransferredRemainderQuantity = state.ManagementMode == ManagedOrderManagementMode.Manual
+                ? progress.EntryRemainder : state.TransferredRemainderQuantity,
             Status = status,
             NextEmergencyCloseAt = status == ManagedOrderStatus.EmergencyCloseWaiting
                 ? state.NextEmergencyCloseAt : null
@@ -1452,7 +2111,8 @@ internal sealed class OrderLifecycleCoordinator
                 || observation.PositionQuantity is not null && observation.PositionQuantity != 0m
                 || contractPositions.Length != 0)
                 return false;
-            progress = new(orderId, null, 0m, remainder, 0m, 0m, 0m, null, null);
+            progress = new(orderId, null, 0m, remainder, 0m, 0m, 0m, null, null, null,
+                observation.EntryOrderState, account);
             return true;
         }
 
@@ -1507,8 +2167,14 @@ internal sealed class OrderLifecycleCoordinator
         }
         var protection = activePosition is null ? null : account.Protections.Value!
             .SingleOrDefault(item => item.PositionId == activePosition.PositionId && item.Contract == state.Contract);
+        var firstFillAt = observation.FirstFillAt;
+        if (read.EntryFillHistoryComplete && read.EntryFirstFillTimes?.TryGetValue(orderId, out var historyFirstFill) == true
+            && (firstFillAt is null || historyFirstFill < firstFillAt))
+            firstFillAt = historyFirstFill;
+        if (firstFillAt is { } first && (first < state.CreatedAt || first > account.ObservedAt))
+            return false;
         progress = new(orderId, observation.PositionId, filledQuantity, remainder, observedPositionQuantity,
-            tpClosed, slClosed, activePosition, protection);
+            tpClosed, slClosed, activePosition, protection, firstFillAt, observation.EntryOrderState, account);
         return true;
     }
 
@@ -1564,15 +2230,158 @@ internal sealed class OrderLifecycleCoordinator
         if (protections.Length != 1)
             return false;
         var protection = protections[0];
-        return protection.TakeProfit is { } takeProfit && protection.StopLoss is { } stopLoss
-            && takeProfit.Value == state.TakeProfit && stopLoss.Value == state.StopLoss
+        var ownerChoicePending = state.ManagementMode == ManagedOrderManagementMode.AwaitingOwnerChoice;
+        var expectedTakeProfit = ownerChoicePending ? state.PendingOwnerTakeProfit : state.TakeProfit;
+        var expectedStopLoss = ownerChoicePending ? state.PendingOwnerStopLoss : state.StopLoss;
+        var expectedTakeProfitId = ownerChoicePending ? state.PendingOwnerTakeProfitOrderId : state.TakeProfitOrderId;
+        var expectedStopLossId = ownerChoicePending ? state.PendingOwnerStopLossOrderId : state.StopLossOrderId;
+        var knownProtectionOwner = protection.Ownership == PositionOwnership.SoftwareOwned
+            || (ownerChoicePending || state.OwnerParametersAccepted)
+                && protection.Ownership == PositionOwnership.Manual
+                && protection.TakeProfitOrderId == expectedTakeProfitId
+                && protection.StopLossOrderId == expectedStopLossId;
+        return expectedTakeProfit is { } expectedTp && expectedStopLoss is { } expectedSl
+            && protection.TakeProfit is { } takeProfit && protection.StopLoss is { } stopLoss
+            && takeProfit.Value == expectedTp && stopLoss.Value == expectedSl
             && takeProfit.Currency == account.QuoteCurrency && stopLoss.Currency == account.QuoteCurrency
-            && protection.Ownership == PositionOwnership.SoftwareOwned
+            && knownProtectionOwner
             && protection.TakeProfitCoveredQuantity >= position.Quantity
             && protection.StopLossCoveredQuantity >= position.Quantity
             && !string.IsNullOrWhiteSpace(protection.TakeProfitOrderId)
+            && !string.IsNullOrWhiteSpace(protection.StopLossOrderId)
+            && (protection.Ownership != PositionOwnership.Manual || !ownerChoicePending
+                || protection.TakeProfitOrderId == expectedTakeProfitId
+                    && protection.StopLossOrderId == expectedStopLossId)
+            && (ownerChoicePending || state.OwnerParametersAccepted
+                || state.TakeProfitOrderId is null || protection.TakeProfitOrderId == state.TakeProfitOrderId)
+            && (ownerChoicePending || state.OwnerParametersAccepted
+                || state.StopLossOrderId is null || protection.StopLossOrderId == state.StopLossOrderId);
+    }
+
+    private static bool HasVerifiedPositionClosure(FillProgress progress) =>
+        progress.Position is null && progress.Filled > 0m && progress.EntryRemainder > 0m
+        && progress.TakeProfitClosed + progress.StopLossClosed == progress.Filled;
+
+    private static bool TryCaptureOwnerChange(
+        ManagedOrderState state,
+        FillProgress progress,
+        AccountSnapshot account,
+        out ManagedOrderState? ownerDecision)
+    {
+        ownerDecision = null;
+        if (progress.Position is null || state.TakeProfitOrderId is null || state.StopLossOrderId is null)
+            return false;
+
+        var protection = progress.Protection;
+        if (protection is null)
+            return false;
+
+        var acceptedManualProtection = state.OwnerParametersAccepted
+            && protection.Ownership == PositionOwnership.Manual
+            && protection.TakeProfit?.Value == state.TakeProfit
+            && protection.StopLoss?.Value == state.StopLoss
+            && protection.TakeProfitOrderId == state.TakeProfitOrderId
+            && protection.StopLossOrderId == state.StopLossOrderId;
+        var changed = protection.TakeProfitOrderId != state.TakeProfitOrderId
+            || protection.StopLossOrderId != state.StopLossOrderId
+            || protection.TakeProfit?.Value != state.TakeProfit
+            || protection.StopLoss?.Value != state.StopLoss
+            || protection.Ownership != PositionOwnership.SoftwareOwned && !acceptedManualProtection;
+        if (!changed)
+            return false;
+
+        var notificationId = NewOwnerDecisionNotificationId(state.IntentId);
+        if (TryReadOwnerProtection(protection, account.QuoteCurrency, out var confirmed)
+            && confirmed is not null)
+        {
+            ownerDecision = state with
+            {
+                ManagementMode = ManagedOrderManagementMode.AwaitingOwnerChoice,
+                PendingOwnerTakeProfit = confirmed.TakeProfit!.Value,
+                PendingOwnerStopLoss = confirmed.StopLoss!.Value,
+                PendingOwnerTakeProfitOrderId = confirmed.TakeProfitOrderId,
+                PendingOwnerStopLossOrderId = confirmed.StopLossOrderId,
+                OwnerDecisionNotificationId = notificationId,
+                Status = ManagedOrderStatus.OwnerDecisionRequired,
+                LastFailure = "Ручное изменение TP/SL подтверждено; ожидается выбор владельца."
+            };
+        }
+        else
+        {
+            ownerDecision = state with
+            {
+                ManagementMode = ManagedOrderManagementMode.AwaitingOwnerChoice,
+                PendingOwnerTakeProfit = null,
+                PendingOwnerStopLoss = null,
+                PendingOwnerTakeProfitOrderId = null,
+                PendingOwnerStopLossOrderId = null,
+                OwnerDecisionNotificationId = notificationId,
+                Status = ManagedOrderStatus.ReconciliationRequired,
+                LastFailure = "Изменение TP/SL подтверждено, но новые уровни или их владелец неоднозначны."
+            };
+        }
+        return true;
+    }
+
+    private static bool TryReadOwnerProtection(
+        PositionProtection? protection,
+        string quoteCurrency,
+        out PositionProtection? confirmed)
+    {
+        confirmed = protection;
+        return protection is { Ownership: PositionOwnership.SoftwareOwned or PositionOwnership.Manual }
+            && protection.TakeProfit is { Value: > 0m } takeProfit
+            && protection.StopLoss is { Value: > 0m } stopLoss
+            && takeProfit.Currency == quoteCurrency && stopLoss.Currency == quoteCurrency
+            && !string.IsNullOrWhiteSpace(protection.TakeProfitOrderId)
             && !string.IsNullOrWhiteSpace(protection.StopLossOrderId);
     }
+
+    private static bool OwnerProtectionMatches(
+        PositionProtection? protection,
+        decimal takeProfit,
+        decimal stopLoss,
+        string takeProfitOrderId,
+        string stopLossOrderId,
+        string quoteCurrency) =>
+        TryReadOwnerProtection(protection, quoteCurrency, out var confirmed)
+        && confirmed!.TakeProfit!.Value == takeProfit && confirmed.StopLoss!.Value == stopLoss
+        && (confirmed.Ownership == PositionOwnership.SoftwareOwned
+            || confirmed.TakeProfitOrderId == takeProfitOrderId
+                && confirmed.StopLossOrderId == stopLossOrderId);
+
+    private static ManagedOrderState ProtectionIntent(ManagedOrderState state) =>
+        state.ManagementMode == ManagedOrderManagementMode.AwaitingOwnerChoice
+            && state.PendingOwnerTakeProfit is { } takeProfit && state.PendingOwnerStopLoss is { } stopLoss
+                ? state with { TakeProfit = takeProfit, StopLoss = stopLoss }
+                : state;
+
+    private async Task<OrderLifecycleResult> PauseForLifecycleReconciliationAsync(
+        ManagedOrderState state,
+        string reason,
+        CancellationToken cancellationToken)
+    {
+        if (state.Status is ManagedOrderStatus.EmergencyCloseWaiting or ManagedOrderStatus.EmergencyClosePaused)
+        {
+            await _recovery.ReportFailureAsync(state.Venue, state.Account, reason, _settings, cancellationToken)
+                .ConfigureAwait(false);
+            return Blocked(reason, state.IntentId);
+        }
+        var paused = await SaveAndPauseAsync(state with
+        {
+            Status = ManagedOrderStatus.OwnershipAmbiguous,
+            LastFailure = reason
+        }, reason, cancellationToken).ConfigureAwait(false);
+        return paused is null
+            ? Blocked("Не удалось сохранить причину сверки.", state.IntentId)
+            : Blocked(reason, state.IntentId);
+    }
+
+    private async Task<ManagedOrderState?> SaveFailureNoteAsync(
+        ManagedOrderState state,
+        string reason,
+        CancellationToken cancellationToken) =>
+        await SaveAsync(state with { LastFailure = reason }, cancellationToken).ConfigureAwait(false);
 
     private static OpenPosition? FindOwnedPosition(
         AccountSnapshot account,
@@ -1668,6 +2477,9 @@ internal sealed class OrderLifecycleCoordinator
                 || order.RemainingQuantity is null)
             || snapshot.Protections.Value!.Any(item => item is null
                 || string.IsNullOrWhiteSpace(item.Contract)))
+            return false;
+        if (read.EntryFirstFillTimes is { } entryFillTimes
+            && entryFillTimes.Any(pair => string.IsNullOrWhiteSpace(pair.Key) || pair.Value > snapshot.ObservedAt))
             return false;
         var positions = snapshot.Positions.Value!;
         var orders = snapshot.Orders.Value!;
@@ -1862,6 +2674,8 @@ internal sealed class OrderLifecycleCoordinator
             PendingAction = null,
             PendingQuantity = null,
             Status = current.PendingPriorStatus ?? ManagedOrderStatus.IntentSaved,
+            PartialFillCancelAttempted = current.PendingAction == ManagedOrderAction.CancelRemainder
+                ? false : current.PartialFillCancelAttempted,
             PendingPriorStatus = null
         }, cancellationToken).ConfigureAwait(false);
     }
@@ -1886,6 +2700,22 @@ internal sealed class OrderLifecycleCoordinator
             await _notifications.DispatchAsync(new NotificationMessage(id, category, text),
                 cancellationToken).ConfigureAwait(false);
     }
+
+    private async Task NotifyOwnerChoiceIfNeededAsync(
+        ManagedOrderState state,
+        CancellationToken cancellationToken)
+    {
+        if (state.ManagementMode == ManagedOrderManagementMode.AwaitingOwnerChoice
+            && state.PendingOwnerTakeProfit is not null && state.PendingOwnerStopLoss is not null
+            && state.PendingOwnerTakeProfitOrderId is not null && state.PendingOwnerStopLossOrderId is not null
+            && state.OwnerDecisionNotificationId is { } notificationId)
+            await NotifyAsync(notificationId, NotificationCategory.OrderChange,
+                "Изменение TP/SL подтверждено; сопровождение приостановлено до выбора владельца.",
+                cancellationToken).ConfigureAwait(false);
+    }
+
+    private static string NewOwnerDecisionNotificationId(string intentId) =>
+        intentId + ":owner-choice:" + Guid.NewGuid().ToString("N");
 
     private static OrderLifecycleResult Blocked(string message, string? intentId = null) =>
         new(false, message, intentId);
@@ -1922,5 +2752,8 @@ internal sealed class OrderLifecycleCoordinator
         decimal TakeProfitClosed,
         decimal StopLossClosed,
         OpenPosition? Position,
-        PositionProtection? Protection);
+        PositionProtection? Protection,
+        DateTimeOffset? FirstFillAt,
+        ManagedEntryTerminalState EntryTerminalState,
+        AccountSnapshot Account);
 }

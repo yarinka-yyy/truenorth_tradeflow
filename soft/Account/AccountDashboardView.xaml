@@ -32,6 +32,45 @@
                    Foreground="{StaticResource AccentBrush}" TextWrapping="Wrap" />
       </Border>
 
+      <Border x:Name="OrderLifecyclePanel" Visibility="Collapsed"
+              Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}"
+              BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,10"
+              AutomationProperties.Name="Тестовые данные о частичном исполнении и выборе владельца">
+        <StackPanel>
+          <TextBlock Text="Частичное исполнение · только локальный пример" FontWeight="SemiBold"
+                     AutomationProperties.Name="Локальный пример жизненного цикла Limit" />
+          <TextBlock x:Name="OrderLifecycleOrderText" Margin="0,4,0,0" TextWrapping="Wrap" />
+          <TextBlock x:Name="OrderLifecycleQuantitiesText" Margin="0,2,0,0" TextWrapping="Wrap" />
+          <TextBlock x:Name="OrderLifecycleDeadlineText" Margin="0,2,0,0"
+                     Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+          <TextBlock x:Name="OrderLifecycleProtectionText" Margin="0,2,0,0"
+                     Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+          <TextBlock x:Name="OrderLifecycleOwnerChangeText" Margin="0,2,0,0"
+                     Foreground="{StaticResource WarningBrush}" TextWrapping="Wrap" />
+          <Grid Margin="0,8,0,0">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="*" />
+              <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <Button x:Name="ContinueOwnerParametersAction" Grid.Column="0"
+                    Style="{StaticResource PrimaryAction}" Margin="0,0,4,0"
+                    Click="ContinueOwnerParameters_Click"
+                    AutomationProperties.Name="В локальном примере продолжить с новыми параметрами владельца">
+              <TextBlock Text="Продолжить с новыми параметрами" TextWrapping="Wrap" />
+            </Button>
+            <Button x:Name="TransferToManualAction" Grid.Column="1"
+                    Style="{StaticResource SecondaryAction}" Margin="4,0,0,0"
+                    Click="TransferToManual_Click"
+                    AutomationProperties.Name="В локальном примере передать позицию и остаток владельцу">
+              <TextBlock Text="Передать владельцу" TextWrapping="Wrap" />
+            </Button>
+          </Grid>
+          <TextBlock x:Name="OrderLifecycleDecisionStatusText" Margin="0,5,0,0"
+                     Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap"
+                     AutomationProperties.LiveSetting="Polite" />
+        </StackPanel>
+      </Border>
+
       <Border x:Name="EntryEligibilityPanel" Visibility="Collapsed"
               Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}"
               BorderThickness="1" CornerRadius="8" Padding="8" Margin="0,0,0,8"

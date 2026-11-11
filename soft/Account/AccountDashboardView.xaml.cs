@@ -12,10 +12,13 @@ namespace TrueNorth.TradeFlow.Account;
 public partial class AccountDashboardView : UserControl
 {
     private EntryEligibilityResult? _entryEligibilityResult;
+    private AccountOrderLifecycleExample? _orderLifecycleExample;
 
     public event EventHandler? ShowExampleRequested;
     public event EventHandler? ExitExampleRequested;
     public event EventHandler? HistoryRequested;
+    public event EventHandler? ContinueWithOwnerParametersRequested;
+    public event EventHandler? TransferToManualRequested;
 
     public AccountDashboardView() => InitializeComponent();
 
@@ -23,6 +26,15 @@ public partial class AccountDashboardView : UserControl
     internal Button ExampleButton => ShowExampleButton;
     internal Button OpenHistoryButton => HistoryButton;
     internal Button ExitButton => ExitExampleButton;
+    internal Button ContinueOwnerParametersButton => ContinueOwnerParametersAction;
+    internal Button TransferToManualButton => TransferToManualAction;
+    internal TextBlock OrderLifecycleDecisionStatusElement => OrderLifecycleDecisionStatusText;
+    internal FrameworkElement OrderLifecyclePanelElement => OrderLifecyclePanel;
+    internal TextBlock OrderLifecycleOrderElement => OrderLifecycleOrderText;
+    internal TextBlock OrderLifecycleQuantitiesElement => OrderLifecycleQuantitiesText;
+    internal TextBlock OrderLifecycleDeadlineElement => OrderLifecycleDeadlineText;
+    internal TextBlock OrderLifecycleProtectionElement => OrderLifecycleProtectionText;
+    internal TextBlock OrderLifecycleOwnerChangeElement => OrderLifecycleOwnerChangeText;
     internal FrameworkElement EligibilityPanelElement => EntryEligibilityPanel;
     internal TextBlock EligibilityStatusElement => EntryEligibilityStatusText;
     internal TextBlock EligibilitySummaryElement => EntryEligibilitySummaryText;
@@ -45,6 +57,7 @@ public partial class AccountDashboardView : UserControl
         NoDataPanel.Visibility = showingExample ? Visibility.Collapsed : Visibility.Visible;
         ExamplePanel.Visibility = showingExample ? Visibility.Visible : Visibility.Collapsed;
         VenueCards.ItemsSource = snapshots?.Select(AccountPresentation.CreateCard).ToArray();
+        RefreshOrderLifecycleExample();
         RefreshEntryEligibility();
     }
 
@@ -52,6 +65,30 @@ public partial class AccountDashboardView : UserControl
     {
         _entryEligibilityResult = result;
         RefreshEntryEligibility();
+    }
+
+    internal void SetOrderLifecycleExample(AccountOrderLifecycleExample? example)
+    {
+        _orderLifecycleExample = example;
+        RefreshOrderLifecycleExample();
+    }
+
+    private void RefreshOrderLifecycleExample()
+    {
+        var example = _orderLifecycleExample;
+        var visible = example is not null && IsShowingExample;
+        OrderLifecyclePanel.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+        if (!visible || example is null)
+            return;
+        OrderLifecycleOrderText.Text = example.Order;
+        OrderLifecycleQuantitiesText.Text = example.Quantities;
+        OrderLifecycleDeadlineText.Text = example.FirstFillDeadline;
+        OrderLifecycleProtectionText.Text = example.Protection;
+        OrderLifecycleOwnerChangeText.Text = example.OwnerChange;
+        OrderLifecycleDecisionStatusText.Text = example.DecisionResult;
+        AutomationProperties.SetName(OrderLifecycleDecisionStatusText, example.DecisionResult);
+        ContinueOwnerParametersAction.IsEnabled = example.CanChooseOwner;
+        TransferToManualAction.IsEnabled = example.CanChooseOwner;
     }
 
     private void RefreshEntryEligibility()
@@ -159,4 +196,8 @@ public partial class AccountDashboardView : UserControl
     private void ShowExample_Click(object sender, RoutedEventArgs e) => ShowExampleRequested?.Invoke(this, EventArgs.Empty);
     private void ExitExample_Click(object sender, RoutedEventArgs e) => ExitExampleRequested?.Invoke(this, EventArgs.Empty);
     private void History_Click(object sender, RoutedEventArgs e) => HistoryRequested?.Invoke(this, EventArgs.Empty);
+    private void ContinueOwnerParameters_Click(object sender, RoutedEventArgs e) =>
+        ContinueWithOwnerParametersRequested?.Invoke(this, EventArgs.Empty);
+    private void TransferToManual_Click(object sender, RoutedEventArgs e) =>
+        TransferToManualRequested?.Invoke(this, EventArgs.Empty);
 }

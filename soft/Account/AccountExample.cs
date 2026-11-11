@@ -1,5 +1,14 @@
 namespace TrueNorth.TradeFlow.Account;
 
+internal sealed record AccountOrderLifecycleExample(
+    string Order,
+    string Quantities,
+    string FirstFillDeadline,
+    string Protection,
+    string OwnerChange,
+    string DecisionResult,
+    bool CanChooseOwner);
+
 public static class AccountExample
 {
     public const string SourceName = "Локальный пример";

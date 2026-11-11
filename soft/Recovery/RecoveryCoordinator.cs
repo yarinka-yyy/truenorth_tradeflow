@@ -38,7 +38,9 @@ internal sealed record RecoverySnapshotRead(
     bool UnfinishedOperationsComplete,
     IReadOnlyDictionary<string, RecoveryOperationObservation>? OperationOutcomes = null,
     string? FailureReason = null,
-    bool ClosedPositionHistoryComplete = false);
+    bool ClosedPositionHistoryComplete = false,
+    IReadOnlyDictionary<string, DateTimeOffset>? EntryFirstFillTimes = null,
+    bool EntryFillHistoryComplete = false);
 
 internal sealed record RecoveryOperationObservation(
     string OperationId,
@@ -56,7 +58,8 @@ internal sealed record RecoveryOperationObservation(
     string? TakeProfitOrderId = null,
     string? StopLossOrderId = null,
     RecoveryRetryability Retryability = RecoveryRetryability.Unknown,
-    ManagedEntryTerminalState EntryOrderState = ManagedEntryTerminalState.Unknown);
+    ManagedEntryTerminalState EntryOrderState = ManagedEntryTerminalState.Unknown,
+    DateTimeOffset? FirstFillAt = null);
 
 internal interface IRecoverySnapshotSource
 {
@@ -261,6 +264,8 @@ internal sealed class RecoveryCoordinator
             {
                 var existing = orders[index];
                 if (existing.Revision != order.Revision
+                    || existing.ManagementMode == ManagedOrderManagementMode.Manual
+                        && order.ManagementMode != ManagedOrderManagementMode.Manual
                     || existing.PendingOperationId is not null && order.PendingOperationId is null
                         && !CanClearPendingManagedOperation(existing, order)
                     || order.PendingOperationId is not null && existing.PendingOperationId is not null

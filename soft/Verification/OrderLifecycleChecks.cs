@@ -1,4 +1,13 @@
 using System.IO;
+using System.Windows;
+using System.Windows.Automation;
+using System.Windows.Automation.Peers;
+using System.Windows.Automation.Provider;
+using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
+using System.Windows.Threading;
 using TrueNorth.TradeFlow.Account;
 using TrueNorth.TradeFlow.Notifications;
 using TrueNorth.TradeFlow.Orders;
@@ -29,6 +38,151 @@ internal static class OrderLifecycleChecks
         CheckEmergencyCloseNoticeAfterRestart(check, Path.Combine(root, "orders-close-notice-restart"));
         CheckEmergencyRetryabilityAndSerialization(check, Path.Combine(root, "orders-retryability"));
         CheckMixedOwnershipBlocksChanges(check, Path.Combine(root, "orders-mixed-ownership"));
+        CheckNormalLimitCompletion(check, Path.Combine(root, "orders-normal-limit-completion"));
+        CheckPartialFillDeadlines(check, Path.Combine(root, "orders-partial-deadlines"));
+        CheckOwnerDecisionsAndFurtherFills(check, Path.Combine(root, "orders-owner-decisions"));
+        CheckTransferAndPendingOutcome(check, Path.Combine(root, "orders-transfer-pending"));
+        CheckAmbiguousRemainderBlocksDueMutation(check, Path.Combine(root, "orders-ambiguous-due"));
+    }
+
+    internal static void CheckNativeWpf(Action<bool, string> check, string root)
+    {
+        if (Application.Current is null)
+        {
+            var app = new App();
+            app.InitializeComponent();
+        }
+
+        var settingsPath = Path.Combine(root, "order-lifecycle-ui", "settings.json");
+        var store = new SettingsStore(settingsPath);
+        var saved = store.Save(new SettingsProfile { SelectedMode = "TrueNorth AI setups" });
+        check(saved.Succeeded, "local owner-decision UI fixture saves an isolated settings profile");
+        var controller = new WakeProtectionController(false, _ => true);
+        var window = new MainWindow(store, store.Load(), controller,
+            new TrueNorthSessionChecks.RecordingSessionService(),
+            orderLifecycleExampleFactory: () => new LocalOrderLifecycleExampleSession(
+                Path.Combine(root, "order-lifecycle-ui", "example-journals")));
+        try
+        {
+            window.Width = 760;
+            window.Height = 560;
+            window.Show();
+            window.Activate();
+            window.UpdateLayout();
+            PumpDispatcher();
+            var dashboard = (AccountDashboardView)window.FindName("AccountDashboardPage")!;
+            Focus(dashboard.ExampleButton);
+            InvokeButton(dashboard.ExampleButton);
+            PumpDispatcher();
+            var firstSession = window.OrderLifecycleExampleSession
+                ?? throw new InvalidOperationException("The isolated lifecycle example did not start.");
+            var beforeContinue = firstSession.Recovery.State.ManagedOrders.Single();
+            var beforeContinuePresentation = firstSession.CreatePresentation();
+            check(dashboard.OrderLifecyclePanelElement.Visibility == Visibility.Visible
+                  && dashboard.ContinueOwnerParametersButton.IsVisible
+                  && dashboard.TransferToManualButton.IsVisible
+                  && beforeContinue.ManagementMode == ManagedOrderManagementMode.AwaitingOwnerChoice
+                  && beforeContinue.Status == ManagedOrderStatus.OwnerDecisionRequired
+                  && Path.GetFullPath(firstSession.JournalPath).StartsWith(
+                      Path.GetFullPath(Path.Combine(root, "order-lifecycle-ui", "example-journals")),
+                      StringComparison.OrdinalIgnoreCase),
+                "the overview reaches owner choice in a separate example journal and exposes both actual decisions");
+            check(dashboard.OrderLifecycleOrderElement.Text == beforeContinuePresentation.Order,
+                "the overview renders the order and cumulative fill from the current journal state");
+            check(dashboard.OrderLifecycleQuantitiesElement.Text == beforeContinuePresentation.Quantities,
+                "the overview renders current position and exact remainder from the current journal state");
+            check(dashboard.OrderLifecycleDeadlineElement.Text == beforeContinuePresentation.FirstFillDeadline,
+                "the overview renders first-fill and cancellation deadlines from the current journal state");
+            check(dashboard.OrderLifecycleProtectionElement.Text == beforeContinuePresentation.Protection,
+                "the overview renders owner protection and coverage from the current journal state");
+            check(dashboard.OrderLifecycleOwnerChangeElement.Text == beforeContinuePresentation.OwnerChange
+                  && dashboard.OrderLifecycleDecisionStatusElement.Text == beforeContinuePresentation.DecisionResult,
+                "the overview renders owner choice and decision status from the current journal state");
+            check(firstSession.OwnerChoiceNotices.Count == 1
+                  && firstSession.OwnerChoiceNotices.Single().Id == beforeContinue.OwnerDecisionNotificationId
+                  && firstSession.OwnerChoiceNotices.Single().Category == NotificationCategory.OrderChange,
+                "a proven manual TP/SL change emits one stable owner-choice notification through the 008 dispatcher");
+            check(dashboard.ContinueOwnerParametersButton.Focusable
+                  && dashboard.ContinueOwnerParametersButton.IsTabStop
+                  && dashboard.TransferToManualButton.Focusable
+                  && dashboard.TransferToManualButton.IsTabStop
+                  && AutomationProperties.GetName(dashboard.ContinueOwnerParametersButton)
+                      .Contains("новыми параметрами", StringComparison.OrdinalIgnoreCase)
+                  && AutomationProperties.GetName(dashboard.TransferToManualButton)
+                      .Contains("владельцу", StringComparison.OrdinalIgnoreCase),
+                "owner choices have keyboard stops and explicit accessible names");
+
+            Focus(dashboard.ContinueOwnerParametersButton);
+            var movedToTransfer = dashboard.ContinueOwnerParametersButton.MoveFocus(
+                new TraversalRequest(FocusNavigationDirection.Next));
+            PumpDispatcher();
+            check(movedToTransfer && dashboard.TransferToManualButton.IsKeyboardFocused,
+                "Tab focus moves from continuing with parameters to manual transfer");
+            ScrollLifecyclePanelIntoView(window, dashboard);
+            RenderWindow(window, Path.Combine(ArtifactsDirectory(), "order-lifecycle-owner-choice-760x560.png"));
+            InvokeButton(dashboard.ContinueOwnerParametersButton);
+            PumpDispatcher();
+            var continued = firstSession.Recovery.State.ManagedOrders.Single();
+            var afterContinuePresentation = firstSession.CreatePresentation();
+            check(dashboard.OrderLifecycleDecisionStatusElement.Text == afterContinuePresentation.DecisionResult
+                  && continued.ManagementMode == ManagedOrderManagementMode.Application
+                  && continued.OwnerParametersAccepted
+                  && continued.TakeProfit == 72400m
+                  && continued.StopLoss == 68800m
+                  && dashboard.OrderLifecycleQuantitiesElement.Text == afterContinuePresentation.Quantities
+                  && dashboard.OrderLifecycleProtectionElement.Text == afterContinuePresentation.Protection
+                  && dashboard.OrderLifecycleOwnerChangeElement.Text == afterContinuePresentation.OwnerChange
+                  && !dashboard.ContinueOwnerParametersButton.IsEnabled
+                  && !dashboard.TransferToManualButton.IsEnabled,
+                "WPF InvokePattern accepts verified owner levels in the example journal and redraws the persisted result");
+            ScrollLifecyclePanelIntoView(window, dashboard);
+            RenderWindow(window, Path.Combine(ArtifactsDirectory(), "order-lifecycle-after-continue-760x560.png"));
+
+            Focus(dashboard.ExitButton);
+            InvokeButton(dashboard.ExitButton);
+            PumpDispatcher();
+            Focus(dashboard.ExampleButton);
+            InvokeButton(dashboard.ExampleButton);
+            PumpDispatcher();
+            var secondSession = window.OrderLifecycleExampleSession
+                ?? throw new InvalidOperationException("The transfer example did not start.");
+            var beforeTransfer = secondSession.Recovery.State.ManagedOrders.Single();
+            check(secondSession.JournalPath != firstSession.JournalPath
+                  && !File.Exists(firstSession.JournalPath)
+                  && beforeTransfer.ManagementMode == ManagedOrderManagementMode.AwaitingOwnerChoice
+                  && dashboard.OrderLifecycleDecisionStatusElement.Text
+                      == secondSession.CreatePresentation().DecisionResult,
+                "reopening the overview creates a fresh example journal and restores its persisted owner decision");
+            Focus(dashboard.ContinueOwnerParametersButton);
+            check(dashboard.ContinueOwnerParametersButton.MoveFocus(
+                    new TraversalRequest(FocusNavigationDirection.Next))
+                  && dashboard.TransferToManualButton.IsKeyboardFocused,
+                "reopening the example restores keyboard traversal to the transfer decision");
+            ScrollLifecyclePanelIntoView(window, dashboard);
+            RenderWindow(window, Path.Combine(ArtifactsDirectory(), "order-lifecycle-transfer-focus-760x560.png"));
+            InvokeButton(dashboard.TransferToManualButton);
+            PumpDispatcher();
+            var transferred = secondSession.Recovery.State.ManagedOrders.Single();
+            var afterTransferPresentation = secondSession.CreatePresentation();
+            check(dashboard.OrderLifecycleDecisionStatusElement.Text == afterTransferPresentation.DecisionResult
+                  && transferred.ManagementMode == ManagedOrderManagementMode.Manual
+                  && transferred.TransferredPositionQuantity == transferred.PositionQuantity
+                  && transferred.TransferredRemainderQuantity == transferred.RemainingQuantity
+                  && dashboard.OrderLifecycleQuantitiesElement.Text == afterTransferPresentation.Quantities
+                  && dashboard.OrderLifecycleProtectionElement.Text == afterTransferPresentation.Protection
+                  && dashboard.OrderLifecycleOwnerChangeElement.Text == afterTransferPresentation.OwnerChange
+                  && !dashboard.ContinueOwnerParametersButton.IsEnabled
+                  && !dashboard.TransferToManualButton.IsEnabled,
+                "WPF InvokePattern transfers the position and remainder in the example journal and redraws its saved values");
+            ScrollLifecyclePanelIntoView(window, dashboard);
+            RenderWindow(window, Path.Combine(ArtifactsDirectory(), "order-lifecycle-after-transfer-760x560.png"));
+        }
+        finally
+        {
+            window.AllowApplicationClose();
+            window.Close();
+            controller.Dispose();
+        }
     }
 
     private static void CheckMarketAndPartialFill(Action<bool, string> check, string root)
@@ -105,8 +259,10 @@ internal static class OrderLifecycleChecks
         var state = harness.Orders.Orders.Single();
         check(opened.Succeeded && state.Status == ManagedOrderStatus.EntryOpen
               && state.FilledQuantity == 0m && state.RemainingQuantity == fixture.Intent.Quantity
-              && state.NextEmergencyCloseAt is null,
-            "an unfilled Limit stays open without starting the partial-fill or emergency-close timer");
+              && state.NextEmergencyCloseAt is null && state.FirstPartialFillAt is null
+              && state.PartialFillCancelAt is null
+              && state.NextManagementCheckAt == InitialTime.AddMinutes(harness.Settings.LimitOrderCheckMinutes),
+            "an unfilled Limit gets its check interval without starting the partial-fill or emergency-close deadline");
 
         harness.Recovery.ReportFailureAsync(Venue, Account, "fixture entry pause", harness.Settings)
             .GetAwaiter().GetResult();
@@ -382,6 +538,13 @@ internal static class OrderLifecycleChecks
               && harness.Adapter.ActionCalls.Count(action => action == "close") == 1,
             "an unknown emergency-close response remains pending and is never repeated automatically");
 
+        var pendingCalls = harness.Adapter.ActionCalls.ToArray();
+        harness.Orders.RunDueChecksAsync(state.IntentId).GetAwaiter().GetResult();
+        state = harness.Orders.Orders.Single();
+        check(state.PendingAction == ManagedOrderAction.EmergencyClose
+              && harness.Adapter.ActionCalls.SequenceEqual(pendingCalls),
+            "ordinary lifecycle polling cannot pass an untrusted close outcome or reach another protection action");
+
         harness.Clock.UtcNow = InitialTime.AddSeconds(harness.Settings.ReadRetryDelaySeconds);
         harness.Adapter.ResolveUnknownClose(state, closeOperation.OperationId);
         harness.Restart();
@@ -429,6 +592,665 @@ internal static class OrderLifecycleChecks
               && unlinked.Adapter.ActionCalls.Count(action => action == "protect") == 1
               && !unlinked.Recovery.IsEntryAllowed(Venue, savedOperatingIntent: true),
             "an exposure linked to an extra order ID stays visible and blocks protection as ambiguous");
+    }
+
+    private static void CheckNormalLimitCompletion(Action<bool, string> check, string root)
+    {
+        var fixture = CreateIntent("Limit", InitialTime);
+        using (var fullFill = new Harness(Path.Combine(root, "confirmed-full-fill"), InitialTime))
+        {
+            fullFill.Adapter.EntryFilledQuantity = fixture.Intent.Quantity / 2m;
+            fullFill.Orders.OpenAsync(fixture.Intent, fixture.Input, savedOperatingIntent: true)
+                .GetAwaiter().GetResult();
+            var before = fullFill.Orders.Orders.Single();
+            fullFill.Adapter.CompleteLimitFillDuringMonitoring(before);
+            fullFill.Clock.UtcNow = before.NextManagementCheckAt!.Value;
+            var reconciled = fullFill.Orders.RunDueChecksAsync(before.IntentId).GetAwaiter().GetResult();
+            var after = fullFill.Orders.Orders.Single();
+            var position = fullFill.Adapter.Positions.Single(candidate => candidate.Contract == fixture.Intent.Contract);
+            var protection = fullFill.Adapter.Protections.Single(candidate => candidate.PositionId == after.PositionId);
+            check(reconciled.Succeeded && after.EntryTerminalState == ManagedEntryTerminalState.Filled
+                  && after.FilledQuantity == fixture.Intent.Quantity && after.RemainingQuantity == 0m
+                  && after.PositionQuantity == fixture.Intent.Quantity && position.Quantity == fixture.Intent.Quantity
+                  && after.NextManagementCheckAt == fullFill.Clock.UtcNow.AddMinutes(fullFill.Settings.PositionCheckMinutes)
+                  && protection.TakeProfit?.Value == fixture.Intent.TakeProfit
+                  && protection.StopLoss?.Value == fixture.Intent.StopLoss
+                  && protection.TakeProfitCoveredQuantity == fixture.Intent.Quantity
+                  && protection.StopLossCoveredQuantity == fixture.Intent.Quantity
+                  && fullFill.Adapter.ActionCalls.SequenceEqual(["entry", "protect", "protect"]),
+                "normal monitoring uses exact terminal fill evidence to persist a full Limit fill, switch to position checks, and cover the grown position without cancellation");
+        }
+
+        using (var unfilled = new Harness(Path.Combine(root, "unfilled-to-full"), InitialTime))
+        {
+            unfilled.Adapter.EntryFilledQuantity = 0m;
+            unfilled.Orders.OpenAsync(fixture.Intent, fixture.Input, savedOperatingIntent: true)
+                .GetAwaiter().GetResult();
+            var unfilledState = unfilled.Orders.Orders.Single();
+            var premature = unfilled.Orders.RunDueChecksAsync(unfilledState.IntentId).GetAwaiter().GetResult();
+            check(!premature.Succeeded && unfilled.Windows.Sent.All(message => message.Id != unfilledState.IntentId + ":opened"),
+                "an unfilled Limit scan before its interval emits no opening notification");
+
+            unfilled.Adapter.CompleteLimitFillDuringMonitoring(unfilledState);
+            unfilled.Clock.UtcNow = unfilledState.NextManagementCheckAt!.Value;
+            var reconciled = unfilled.Orders.RunDueChecksAsync(unfilledState.IntentId).GetAwaiter().GetResult();
+            var full = unfilled.Orders.Orders.Single();
+            var position = unfilled.Adapter.Positions.Single(candidate => candidate.Contract == fixture.Intent.Contract);
+            var protection = unfilled.Adapter.Protections.Single(candidate => candidate.PositionId == full.PositionId);
+            var openedNotice = unfilled.Windows.Sent.Single(message => message.Id == unfilledState.IntentId + ":opened");
+            var calls = unfilled.Adapter.ActionCalls.ToArray();
+            check(reconciled.Succeeded && full.PositionId is not null
+                  && full.EntryTerminalState == ManagedEntryTerminalState.Filled
+                  && full.FilledQuantity == fixture.Intent.Quantity && full.RemainingQuantity == 0m
+                  && full.PositionQuantity == fixture.Intent.Quantity && position.Quantity == fixture.Intent.Quantity
+                  && full.NextManagementCheckAt == unfilled.Clock.UtcNow.AddMinutes(unfilled.Settings.PositionCheckMinutes)
+                  && protection.TakeProfitCoveredQuantity == fixture.Intent.Quantity
+                  && protection.StopLossCoveredQuantity == fixture.Intent.Quantity
+                  && openedNotice.Category == NotificationCategory.Opening
+                  && unfilled.Adapter.ActionCalls.SequenceEqual(["entry", "protect"]),
+                "a first full fill from an unfilled Limit learns its proven position ID, protects full size, emits one opening notice, and never cancels");
+            unfilled.Clock.UtcNow = full.NextManagementCheckAt!.Value;
+            unfilled.Orders.RunDueChecksAsync(full.IntentId).GetAwaiter().GetResult();
+            check(unfilled.Windows.Sent.Count(message => message.Id == unfilledState.IntentId + ":opened") == 1
+                  && unfilled.Adapter.ActionCalls.SequenceEqual(calls),
+                "routine position polling does not repeat the stable opening notification or mutate covered exposure");
+        }
+
+        using (var openingDisabled = new Harness(Path.Combine(root, "normal-open-notification-disabled"), InitialTime,
+                   settings => settings.OpeningNotifications = false))
+        {
+            openingDisabled.Adapter.EntryFilledQuantity = 0m;
+            openingDisabled.Orders.OpenAsync(fixture.Intent, fixture.Input, savedOperatingIntent: true)
+                .GetAwaiter().GetResult();
+            var notificationState = openingDisabled.Orders.Orders.Single();
+            openingDisabled.Adapter.CompleteLimitFillDuringMonitoring(notificationState);
+            openingDisabled.Clock.UtcNow = notificationState.NextManagementCheckAt!.Value;
+            var reconciled = openingDisabled.Orders.RunDueChecksAsync(notificationState.IntentId).GetAwaiter().GetResult();
+            check(reconciled.Succeeded && openingDisabled.Orders.Orders.Single().EntryTerminalState
+                      == ManagedEntryTerminalState.Filled
+                  && openingDisabled.Windows.Sent.All(message => message.Id != notificationState.IntentId + ":opened"),
+                "normal monitoring honors the disabled opening-notification setting while reconciling and protecting the fill");
+        }
+
+        using (var mismatched = new Harness(Path.Combine(root, "mismatched-full-fill-proof"), InitialTime))
+        {
+            mismatched.Adapter.EntryFilledQuantity = 0m;
+            mismatched.Orders.OpenAsync(fixture.Intent, fixture.Input, savedOperatingIntent: true)
+                .GetAwaiter().GetResult();
+            var mismatchedState = mismatched.Orders.Orders.Single();
+            mismatched.Adapter.CompleteLimitFillDuringMonitoring(mismatchedState);
+            mismatched.Adapter.CorruptOriginEntryPositionId(mismatchedState, "unlinked-position");
+            mismatched.Clock.UtcNow = mismatchedState.NextManagementCheckAt!.Value;
+            var blocked = mismatched.Orders.RunDueChecksAsync(mismatchedState.IntentId).GetAwaiter().GetResult();
+            var mismatchedPaused = mismatched.Orders.Orders.Single();
+            check(!blocked.Succeeded && mismatchedPaused.Status == ManagedOrderStatus.OwnershipAmbiguous
+                  && mismatchedPaused.EntryTerminalState == ManagedEntryTerminalState.Open
+                  && mismatchedPaused.PositionId is null && mismatched.Adapter.ActionCalls.SequenceEqual(["entry"])
+                  && mismatched.Windows.Sent.All(message => message.Id != mismatchedState.IntentId + ":opened"),
+                "a terminal full-fill observation linked to the wrong position remains paused without protection, cancellation, or opening notice");
+        }
+
+        using var absent = new Harness(Path.Combine(root, "bare-absence"), InitialTime);
+        absent.Adapter.EntryFilledQuantity = fixture.Intent.Quantity / 2m;
+        absent.Orders.OpenAsync(fixture.Intent, fixture.Input, savedOperatingIntent: true)
+            .GetAwaiter().GetResult();
+        var open = absent.Orders.Orders.Single();
+        absent.Adapter.RemoveEntryOrderWithoutTerminalEvidence();
+        absent.Clock.UtcNow = open.NextManagementCheckAt!.Value;
+        var ambiguous = absent.Orders.RunDueChecksAsync(open.IntentId).GetAwaiter().GetResult();
+        var paused = absent.Orders.Orders.Single();
+        check(!ambiguous.Succeeded && paused.EntryTerminalState == ManagedEntryTerminalState.Open
+              && paused.Status == ManagedOrderStatus.OwnershipAmbiguous
+              && paused.RemainingQuantity == fixture.Intent.Quantity / 2m
+              && absent.Adapter.ActionCalls.SequenceEqual(["entry", "protect"]),
+            "a missing open Limit row without exact terminal evidence remains ambiguous and causes no cancellation or repair");
+
+        foreach (var closeByTakeProfit in new[] { true, false })
+        {
+            using var closed = new Harness(Path.Combine(root,
+                    closeByTakeProfit ? "normal-full-tp-closure" : "normal-full-sl-closure"), InitialTime);
+            closed.Adapter.EntryFilledQuantity = fixture.Intent.Quantity;
+            closed.Orders.OpenAsync(fixture.Intent, fixture.Input, savedOperatingIntent: true)
+                .GetAwaiter().GetResult();
+            var active = closed.Orders.Orders.Single();
+            if (closeByTakeProfit)
+                closed.Adapter.CloseByTakeProfit(active);
+            else
+                closed.Adapter.CloseByStopLoss(active);
+            closed.Clock.UtcNow = active.NextManagementCheckAt!.Value;
+            var result = closed.Orders.RunDueChecksAsync(active.IntentId).GetAwaiter().GetResult();
+            var state = closed.Orders.Orders.Single();
+            var notice = closed.Windows.Sent.Single(message => message.Id == active.IntentId + ":closed");
+            var calls = closed.Adapter.ActionCalls.ToArray();
+            closed.Clock.UtcNow = state.NextManagementCheckAt ?? closed.Clock.UtcNow;
+            closed.Orders.RunDueChecksAsync(active.IntentId).GetAwaiter().GetResult();
+            check(result.Succeeded && state.Status == ManagedOrderStatus.Closed
+                  && state.PositionQuantity == 0m && state.RemainingQuantity == 0m
+                  && notice.Category == NotificationCategory.Closing
+                  && closed.Windows.Sent.Count(message => message.Id == active.IntentId + ":closed") == 1
+                  && closed.Adapter.ActionCalls.SequenceEqual(calls)
+                  && calls.SequenceEqual(["entry", "protect"]),
+                $"normal monitoring saves a verified full {(closeByTakeProfit ? "TP" : "SL")} closure once, notifies through 008, and sends no cancel or close");
+        }
+
+        using (var closingDisabled = new Harness(Path.Combine(root, "normal-close-notification-disabled"), InitialTime,
+                   settings => settings.ClosingNotifications = false))
+        {
+            closingDisabled.Adapter.EntryFilledQuantity = fixture.Intent.Quantity;
+            closingDisabled.Orders.OpenAsync(fixture.Intent, fixture.Input, savedOperatingIntent: true)
+                .GetAwaiter().GetResult();
+            var active = closingDisabled.Orders.Orders.Single();
+            closingDisabled.Adapter.CloseByTakeProfit(active);
+            closingDisabled.Clock.UtcNow = active.NextManagementCheckAt!.Value;
+            closingDisabled.Orders.RunDueChecksAsync(active.IntentId).GetAwaiter().GetResult();
+            check(closingDisabled.Orders.Orders.Single().Status == ManagedOrderStatus.Closed
+                  && closingDisabled.Windows.Sent.All(message => message.Id != active.IntentId + ":closed"),
+                "normal monitoring honors the disabled closing-notification setting while persisting verified closure");
+        }
+    }
+
+    private static void CheckPartialFillDeadlines(Action<bool, string> check, string root)
+    {
+        var fixture = CreateIntent("Limit", InitialTime);
+        using (var fullLimit = new Harness(Path.Combine(root, "full-limit"), InitialTime))
+        {
+            fullLimit.Adapter.EntryFilledQuantity = fixture.Intent.Quantity;
+            fullLimit.Orders.OpenAsync(fixture.Intent, fixture.Input, savedOperatingIntent: true)
+                .GetAwaiter().GetResult();
+            var full = fullLimit.Orders.Orders.Single();
+            fullLimit.Clock.UtcNow = full.NextManagementCheckAt!.Value;
+            var checkedPosition = fullLimit.Orders.RunDueChecksAsync(full.IntentId).GetAwaiter().GetResult();
+            check(full.FirstPartialFillAt is null && full.PartialFillCancelAt is null
+                  && full.NextManagementCheckAt == InitialTime.AddMinutes(fullLimit.Settings.PositionCheckMinutes)
+                  && checkedPosition.Succeeded
+                  && fullLimit.Adapter.ActionCalls.SequenceEqual(["entry", "protect"]),
+                "a fully filled Limit switches to position checks and never starts remainder cancellation");
+        }
+
+        using (var restart = new Harness(Path.Combine(root, "restart-deadline"), InitialTime))
+        {
+            restart.Adapter.EntryFilledQuantity = fixture.Intent.Quantity / 2m;
+            restart.Orders.OpenAsync(fixture.Intent, fixture.Input, savedOperatingIntent: true)
+                .GetAwaiter().GetResult();
+            var initial = restart.Orders.Orders.Single();
+            var deadline = InitialTime.AddMinutes(restart.Settings.PartialFillCancelMinutes);
+            check(initial.FirstPartialFillAt == InitialTime && initial.PartialFillCancelAt == deadline
+                  && initial.NextManagementCheckAt == InitialTime.AddMinutes(restart.Settings.LimitOrderCheckMinutes),
+                "the first partial fill saves one cancellation deadline and uses the Limit check interval");
+
+            restart.Restart();
+            restart.Clock.UtcNow = deadline;
+            var cancelled = restart.Orders.RunDueChecksAsync(initial.IntentId).GetAwaiter().GetResult();
+            var state = restart.Orders.Orders.Single();
+            check(cancelled.Succeeded && state.EntryTerminalState == ManagedEntryTerminalState.Cancelled
+                  && state.FilledQuantity == fixture.Intent.Quantity / 2m && state.RemainingQuantity == 0m
+                  && state.PositionQuantity == fixture.Intent.Quantity / 2m
+                  && state.PartialFillCancelAt == deadline
+                  && restart.Adapter.ActionCalls.SequenceEqual(["entry", "protect", "cancel"]),
+                "restart keeps the original deadline and cancels only the exact open remainder once");
+            check(restart.Adapter.ProtectRequests.Last().Quantity == fixture.Intent.Quantity / 2m
+                  && restart.Adapter.ProtectRequests.Last().PositionId == state.PositionId,
+                "cancelling a partial order leaves its actual position covered without expanding the target");
+        }
+
+        using (var history = new Harness(Path.Combine(root, "history-deadline"), InitialTime))
+        {
+            history.Adapter.EntryFilledQuantity = fixture.Intent.Quantity / 2m;
+            history.Adapter.OmitFirstFillTime = true;
+            history.Orders.OpenAsync(fixture.Intent, fixture.Input, savedOperatingIntent: true)
+                .GetAwaiter().GetResult();
+            history.Adapter.EntryFillHistoryComplete = true;
+            history.Adapter.EntryHistoryFirstFillAt = InitialTime;
+            history.Restart();
+            history.Clock.UtcNow = InitialTime.AddMinutes(history.Settings.LimitOrderCheckMinutes);
+            var reconciled = history.Orders.RunDueChecksAsync(history.Orders.Orders.Single().IntentId)
+                .GetAwaiter().GetResult();
+            var state = history.Orders.Orders.Single();
+            check(reconciled.Succeeded && state.FirstPartialFillAt == InitialTime
+                  && state.PartialFillCancelAt == InitialTime.AddMinutes(history.Settings.PartialFillCancelMinutes)
+                  && state.EntryTerminalState == ManagedEntryTerminalState.Open
+                  && !history.Adapter.ActionCalls.Contains("cancel"),
+                "fresh complete fill history restores the earliest first-fill time instead of restarting its timer");
+        }
+
+        using (var earlierHistory = new Harness(Path.Combine(root, "earlier-history"), InitialTime))
+        {
+            earlierHistory.Adapter.EntryFilledQuantity = fixture.Intent.Quantity / 2m;
+            earlierHistory.Adapter.OmitFirstFillTime = true;
+            earlierHistory.Orders.OpenAsync(fixture.Intent, fixture.Input, savedOperatingIntent: true)
+                .GetAwaiter().GetResult();
+            var initial = earlierHistory.Orders.Orders.Single();
+            var laterSavedFill = InitialTime.AddMinutes(1);
+            var savedLater = earlierHistory.Recovery.SaveManagedOrderAsync(initial with
+                {
+                    FirstPartialFillAt = laterSavedFill,
+                    PartialFillCancelAt = laterSavedFill.AddMinutes(earlierHistory.Settings.PartialFillCancelMinutes)
+                }).GetAwaiter().GetResult()
+                ?? throw new InvalidOperationException("The controlled later deadline did not persist.");
+            earlierHistory.Adapter.EntryFillHistoryComplete = true;
+            earlierHistory.Adapter.EntryHistoryFirstFillAt = InitialTime;
+            earlierHistory.Clock.UtcNow = savedLater.NextManagementCheckAt!.Value;
+            earlierHistory.Orders.RunDueChecksAsync(savedLater.IntentId).GetAwaiter().GetResult();
+            var earlier = earlierHistory.Orders.Orders.Single();
+            var earliestDeadline = InitialTime.AddMinutes(earlierHistory.Settings.PartialFillCancelMinutes);
+            earlierHistory.Adapter.EntryHistoryFirstFillAt = InitialTime.AddMinutes(2);
+            earlierHistory.Clock.UtcNow = earlier.NextManagementCheckAt!.Value;
+            earlierHistory.Orders.RunDueChecksAsync(earlier.IntentId).GetAwaiter().GetResult();
+            var afterLaterHistory = earlierHistory.Orders.Orders.Single();
+            check(earlier.FirstPartialFillAt == InitialTime && earlier.PartialFillCancelAt == earliestDeadline
+                  && afterLaterHistory.FirstPartialFillAt == InitialTime
+                  && afterLaterHistory.PartialFillCancelAt == earliestDeadline,
+                "later exact fill history can move a saved first-fill deadline earlier, while a later history value never postpones it");
+        }
+
+        using (var unknownHistory = new Harness(Path.Combine(root, "unknown-history"), InitialTime))
+        {
+            unknownHistory.Adapter.EntryFilledQuantity = fixture.Intent.Quantity / 2m;
+            unknownHistory.Adapter.OmitFirstFillTime = true;
+            unknownHistory.Orders.OpenAsync(fixture.Intent, fixture.Input, savedOperatingIntent: true)
+                .GetAwaiter().GetResult();
+            var before = unknownHistory.Orders.Orders.Single();
+            unknownHistory.Restart();
+            unknownHistory.Clock.UtcNow = InitialTime.AddMinutes(unknownHistory.Settings.LimitOrderCheckMinutes);
+            var cancelled = unknownHistory.Orders.RunDueChecksAsync(before.IntentId).GetAwaiter().GetResult();
+            var after = unknownHistory.Orders.Orders.Single();
+            check(cancelled.Succeeded && after.FirstPartialFillAt is null
+                  && after.EntryTerminalState == ManagedEntryTerminalState.Cancelled
+                  && after.RemainingQuantity == 0m
+                  && unknownHistory.Adapter.ActionCalls.Count(action => action == "cancel") == 1,
+                "when history cannot establish the first fill after restart, a fresh exact remainder is cancelled once");
+        }
+
+        using (var rejected = new Harness(Path.Combine(root, "one-cancel-attempt"), InitialTime))
+        {
+            rejected.Adapter.EntryFilledQuantity = fixture.Intent.Quantity / 2m;
+            rejected.Orders.OpenAsync(fixture.Intent, fixture.Input, savedOperatingIntent: true)
+                .GetAwaiter().GetResult();
+            var state = rejected.Orders.Orders.Single();
+            rejected.Adapter.CancelOutcome = RecoveryOperationOutcome.NotExecuted;
+            rejected.Clock.UtcNow = state.PartialFillCancelAt!.Value;
+            rejected.Orders.RunDueChecksAsync(state.IntentId).GetAwaiter().GetResult();
+            var afterFailure = rejected.Orders.Orders.Single();
+            rejected.Orders.RunDueChecksAsync(state.IntentId).GetAwaiter().GetResult();
+            check(afterFailure.PartialFillCancelAttempted
+                  && rejected.Orders.Orders.Single().EntryTerminalState == ManagedEntryTerminalState.Open
+                  && rejected.Adapter.ActionCalls.Count(action => action == "cancel") == 1,
+                "a confirmed cancel rejection is recorded and the due scheduler does not send the same cancel again");
+        }
+
+        foreach (var closeByTakeProfit in new[] { true, false })
+        {
+            using var closed = new Harness(Path.Combine(root, closeByTakeProfit ? "tp-closure" : "sl-closure"),
+                InitialTime);
+            closed.Adapter.EntryFilledQuantity = fixture.Intent.Quantity / 2m;
+            closed.Orders.OpenAsync(fixture.Intent, fixture.Input, savedOperatingIntent: true)
+                .GetAwaiter().GetResult();
+            var state = closed.Orders.Orders.Single();
+            if (closeByTakeProfit)
+                closed.Adapter.CloseByTakeProfit(state);
+            else
+                closed.Adapter.CloseByStopLoss(state);
+            closed.Clock.UtcNow = state.NextManagementCheckAt!.Value;
+            var result = closed.Orders.RunDueChecksAsync(state.IntentId).GetAwaiter().GetResult();
+            var after = closed.Orders.Orders.Single();
+            check(result.Succeeded && after.EntryTerminalState == ManagedEntryTerminalState.Cancelled
+                  && after.PositionQuantity == 0m && after.RemainingQuantity == 0m
+                  && (closeByTakeProfit ? after.TakeProfitClosedQuantity : after.StopLossClosedQuantity)
+                      == fixture.Intent.Quantity / 2m
+                  && closed.Adapter.ActionCalls.SequenceEqual(["entry", "protect", "cancel"]),
+                $"a verified {(closeByTakeProfit ? "TP" : "SL")} closure cancels the exact remaining Limit once");
+        }
+
+        using var stopped = new Harness(Path.Combine(root, "stop-preserves-position"), InitialTime);
+        stopped.Adapter.EntryFilledQuantity = fixture.Intent.Quantity / 2m;
+        stopped.Orders.OpenAsync(fixture.Intent, fixture.Input, savedOperatingIntent: true)
+            .GetAwaiter().GetResult();
+        var stop = stopped.Orders.StopAsync().GetAwaiter().GetResult();
+        var afterStop = stopped.Orders.Orders.Single();
+        check(stop.Succeeded && afterStop.EntryTerminalState == ManagedEntryTerminalState.Cancelled
+              && afterStop.PositionQuantity == fixture.Intent.Quantity / 2m
+              && afterStop.Status == ManagedOrderStatus.Protected
+              && stopped.Adapter.Positions.Single(position => position.Contract == fixture.Intent.Contract).Quantity
+                  == fixture.Intent.Quantity / 2m
+              && stopped.Adapter.ActionCalls.SequenceEqual(["entry", "protect", "cancel"]),
+            "Stop cancels the owned remainder while keeping the exact filled position protected");
+    }
+
+    private static void CheckOwnerDecisionsAndFurtherFills(Action<bool, string> check, string root)
+    {
+        var fixture = CreateIntent("Limit", InitialTime);
+        using (var owner = new Harness(Path.Combine(root, "continue"), InitialTime))
+        {
+            owner.Adapter.EntryFilledQuantity = fixture.Intent.Quantity / 2m;
+            owner.Orders.OpenAsync(fixture.Intent, fixture.Input, savedOperatingIntent: true)
+                .GetAwaiter().GetResult();
+            var before = owner.Orders.Orders.Single();
+            owner.Adapter.SetManualProtection(before, fixture.Intent.TakeProfit + 1m, fixture.Intent.StopLoss - 1m);
+            owner.Clock.UtcNow = before.NextManagementCheckAt!.Value;
+            var detected = owner.Orders.RunDueChecksAsync(before.IntentId).GetAwaiter().GetResult();
+            var pending = owner.Orders.Orders.Single();
+            var deadline = before.PartialFillCancelAt;
+            check(!detected.Succeeded && pending.ManagementMode == ManagedOrderManagementMode.AwaitingOwnerChoice
+                  && pending.Status == ManagedOrderStatus.OwnerDecisionRequired
+                  && pending.PendingOwnerTakeProfit == fixture.Intent.TakeProfit + 1m
+                  && pending.PendingOwnerStopLoss == fixture.Intent.StopLoss - 1m
+                  && pending.PartialFillCancelAt == deadline
+                  && owner.Adapter.ActionCalls.SequenceEqual(["entry", "protect"]),
+                "a proven manual TP/SL change pauses ordinary management and keeps the original cancel schedule");
+
+            owner.Restart();
+            owner.Adapter.SetManualProtection(pending, fixture.Intent.TakeProfit + 2m, fixture.Intent.StopLoss - 2m);
+            var staleChoice = owner.Orders.ContinueWithOwnerParametersAsync(before.IntentId).GetAwaiter().GetResult();
+            pending = owner.Orders.Orders.Single();
+            check(!staleChoice.Succeeded && pending.ManagementMode == ManagedOrderManagementMode.AwaitingOwnerChoice
+                  && pending.TakeProfit == fixture.Intent.TakeProfit
+                  && pending.PendingOwnerTakeProfit == fixture.Intent.TakeProfit + 2m
+                  && owner.Adapter.ActionCalls.SequenceEqual(["entry", "protect"]),
+                "Continue re-reads the displayed TP/SL and requires a new choice when they changed again");
+
+            owner.Adapter.AddPartialFill(pending, fixture.Intent.Quantity / 4m);
+            owner.Clock.UtcNow = pending.NextManagementCheckAt!.Value;
+            owner.Orders.RunDueChecksAsync(before.IntentId).GetAwaiter().GetResult();
+            pending = owner.Orders.Orders.Single();
+            var grownPosition = owner.Adapter.Positions.Single(candidate => candidate.PositionId == before.PositionId);
+            var grownProtection = owner.Adapter.Protections.Single(candidate => candidate.PositionId == before.PositionId);
+            check(pending.ManagementMode == ManagedOrderManagementMode.AwaitingOwnerChoice
+                  && pending.FilledQuantity == fixture.Intent.Quantity * 3m / 4m
+                  && grownPosition.Quantity == pending.PositionQuantity
+                  && grownProtection.TakeProfit?.Value == fixture.Intent.TakeProfit + 2m
+                  && grownProtection.StopLoss?.Value == fixture.Intent.StopLoss - 2m
+                  && grownProtection.TakeProfitCoveredQuantity == grownPosition.Quantity
+                  && grownProtection.StopLossCoveredQuantity == grownPosition.Quantity
+                  && owner.Adapter.ActionCalls.SequenceEqual(["entry", "protect", "protect"]),
+                "a later fill during owner choice receives full protection at the re-read owner levels before either choice is accepted");
+
+            var continued = owner.Orders.ContinueWithOwnerParametersAsync(before.IntentId).GetAwaiter().GetResult();
+            var accepted = owner.Orders.Orders.Single();
+            owner.Clock.UtcNow = accepted.NextManagementCheckAt!.Value;
+            var afterAcceptanceCheck = owner.Orders.RunDueChecksAsync(before.IntentId).GetAwaiter().GetResult();
+            var checkedAccepted = owner.Orders.Orders.Single();
+            check(continued.Succeeded && accepted.ManagementMode == ManagedOrderManagementMode.Application
+                  && accepted.OwnerParametersAccepted && accepted.TakeProfit == fixture.Intent.TakeProfit + 2m
+                  && accepted.StopLoss == fixture.Intent.StopLoss - 2m
+                  && accepted.PartialFillCancelAt == deadline
+                  && accepted.Status == ManagedOrderStatus.Protected
+                  && accepted.PositionQuantity == fixture.Intent.Quantity * 3m / 4m
+                  && afterAcceptanceCheck.Succeeded
+                  && checkedAccepted.ManagementMode == ManagedOrderManagementMode.Application
+                  && checkedAccepted.OwnerParametersAccepted
+                  && owner.Adapter.ActionCalls.SequenceEqual(["entry", "protect", "protect"]),
+                "a second fresh choice accepts the current owner levels without resetting the deadline or reopening the decision");
+        }
+
+        using (var timer = new Harness(Path.Combine(root, "owner-timer-keeps-running"), InitialTime))
+        {
+            timer.Adapter.EntryFilledQuantity = fixture.Intent.Quantity / 2m;
+            timer.Orders.OpenAsync(fixture.Intent, fixture.Input, savedOperatingIntent: true)
+                .GetAwaiter().GetResult();
+            var state = timer.Orders.Orders.Single();
+            timer.Adapter.SetManualProtection(state, fixture.Intent.TakeProfit + 1m,
+                fixture.Intent.StopLoss - 1m);
+            timer.Clock.UtcNow = state.NextManagementCheckAt!.Value;
+            timer.Orders.RunDueChecksAsync(state.IntentId).GetAwaiter().GetResult();
+            timer.Clock.UtcNow = state.PartialFillCancelAt!.Value;
+            var cancelled = timer.Orders.RunDueChecksAsync(state.IntentId).GetAwaiter().GetResult();
+            var after = timer.Orders.Orders.Single();
+            check(cancelled.Succeeded && after.ManagementMode == ManagedOrderManagementMode.AwaitingOwnerChoice
+                  && after.EntryTerminalState == ManagedEntryTerminalState.Cancelled
+                  && after.PositionQuantity == fixture.Intent.Quantity / 2m
+                  && timer.Adapter.ActionCalls.SequenceEqual(["entry", "protect", "cancel"]),
+                "the partial-fill deadline continues through an owner decision and cancels only its remainder");
+        }
+
+        using (var fill = new Harness(Path.Combine(root, "further-fill"), InitialTime))
+        {
+            fill.Adapter.EntryFilledQuantity = fixture.Intent.Quantity / 2m;
+            fill.Orders.OpenAsync(fixture.Intent, fixture.Input, savedOperatingIntent: true)
+                .GetAwaiter().GetResult();
+            var state = fill.Orders.Orders.Single();
+            fill.Adapter.SetManualProtection(state, fixture.Intent.TakeProfit + 1m, fixture.Intent.StopLoss - 1m);
+            fill.Adapter.AddPartialFill(state, fixture.Intent.Quantity / 4m);
+            fill.Clock.UtcNow = state.NextManagementCheckAt!.Value;
+            fill.Orders.RunDueChecksAsync(state.IntentId).GetAwaiter().GetResult();
+            var updated = fill.Orders.Orders.Single();
+            var position = fill.Adapter.Positions.Single(candidate => candidate.PositionId == state.PositionId);
+            var protection = fill.Adapter.Protections.Single(candidate => candidate.PositionId == state.PositionId);
+            check(updated.ManagementMode == ManagedOrderManagementMode.AwaitingOwnerChoice
+                  && updated.FilledQuantity == fixture.Intent.Quantity * 3m / 4m
+                  && updated.RemainingQuantity == fixture.Intent.Quantity / 4m
+                  && updated.PartialFillCancelAt == state.PartialFillCancelAt
+                  && updated.PositionQuantity == position.Quantity
+                  && protection.TakeProfit?.Value == fixture.Intent.TakeProfit + 1m
+                  && protection.StopLoss?.Value == fixture.Intent.StopLoss - 1m
+                  && protection.TakeProfitCoveredQuantity == position.Quantity
+                  && protection.StopLossCoveredQuantity == position.Quantity
+                  && fill.Adapter.ActionCalls.SequenceEqual(["entry", "protect", "protect"]),
+                "a further fill receives full protection at the fresh owner levels while the management choice stays open");
+            var protectedCalls = fill.Adapter.ActionCalls.ToArray();
+            var transfer = fill.Orders.TransferToManualAsync(state.IntentId).GetAwaiter().GetResult();
+            var transferredFill = fill.Orders.Orders.Single();
+            check(transfer.Succeeded && transferredFill.ManagementMode == ManagedOrderManagementMode.Manual
+                  && transferredFill.TransferredPositionQuantity == fixture.Intent.Quantity * 3m / 4m
+                  && transferredFill.TransferredRemainderQuantity == fixture.Intent.Quantity / 4m
+                  && fill.Adapter.ActionCalls.SequenceEqual(protectedCalls),
+                "Transfer after a further fill saves the current position and remainder without another adapter action");
+        }
+
+        using (var rejectedCancel = new Harness(Path.Combine(root, "rejected-cancel-then-fill"), InitialTime))
+        {
+            rejectedCancel.Adapter.EntryFilledQuantity = fixture.Intent.Quantity / 2m;
+            rejectedCancel.Orders.OpenAsync(fixture.Intent, fixture.Input, savedOperatingIntent: true)
+                .GetAwaiter().GetResult();
+            var initial = rejectedCancel.Orders.Orders.Single();
+            rejectedCancel.Adapter.SetManualProtection(initial, fixture.Intent.TakeProfit + 1m,
+                fixture.Intent.StopLoss - 1m);
+            rejectedCancel.Clock.UtcNow = initial.NextManagementCheckAt!.Value;
+            rejectedCancel.Orders.RunDueChecksAsync(initial.IntentId).GetAwaiter().GetResult();
+            var awaiting = rejectedCancel.Orders.Orders.Single();
+            rejectedCancel.Adapter.CancelOutcome = RecoveryOperationOutcome.NotExecuted;
+            rejectedCancel.Clock.UtcNow = awaiting.PartialFillCancelAt!.Value;
+            rejectedCancel.Orders.RunDueChecksAsync(initial.IntentId).GetAwaiter().GetResult();
+            var rejected = rejectedCancel.Orders.Orders.Single();
+            rejectedCancel.Adapter.AddPartialFill(rejected, fixture.Intent.Quantity / 4m);
+            rejectedCancel.Clock.UtcNow = rejected.NextManagementCheckAt!.Value;
+            rejectedCancel.Orders.RunDueChecksAsync(initial.IntentId).GetAwaiter().GetResult();
+            var afterFill = rejectedCancel.Orders.Orders.Single();
+            var position = rejectedCancel.Adapter.Positions.Single(candidate => candidate.PositionId == initial.PositionId);
+            var protection = rejectedCancel.Adapter.Protections.Single(candidate => candidate.PositionId == initial.PositionId);
+            check(afterFill.ManagementMode == ManagedOrderManagementMode.AwaitingOwnerChoice
+                  && afterFill.PartialFillCancelAttempted && afterFill.FilledQuantity == fixture.Intent.Quantity * 3m / 4m
+                  && protection.TakeProfit?.Value == fixture.Intent.TakeProfit + 1m
+                  && protection.StopLoss?.Value == fixture.Intent.StopLoss - 1m
+                  && protection.TakeProfitCoveredQuantity == position.Quantity
+                  && protection.StopLossCoveredQuantity == position.Quantity
+                  && rejectedCancel.Adapter.ActionCalls.Count(action => action == "cancel") == 1
+                  && rejectedCancel.Adapter.ActionCalls.SequenceEqual(["entry", "protect", "cancel", "protect"]),
+                "a known rejected deadline cancel is not repeated, while a later owner-decision fill is protected at verified owner levels");
+        }
+
+        using (var directRace = new Harness(Path.Combine(root, "owner-full-fill-during-cancel"), InitialTime))
+        {
+            directRace.Adapter.EntryFilledQuantity = fixture.Intent.Quantity / 2m;
+            directRace.Orders.OpenAsync(fixture.Intent, fixture.Input, savedOperatingIntent: true)
+                .GetAwaiter().GetResult();
+            var initial = directRace.Orders.Orders.Single();
+            directRace.Adapter.SetManualProtection(initial, fixture.Intent.TakeProfit + 1m,
+                fixture.Intent.StopLoss - 1m);
+            directRace.Clock.UtcNow = initial.NextManagementCheckAt!.Value;
+            directRace.Orders.RunDueChecksAsync(initial.IntentId).GetAwaiter().GetResult();
+            var awaiting = directRace.Orders.Orders.Single();
+            directRace.Adapter.CancelRacesToFullFill = true;
+            directRace.Adapter.CancelOutcome = RecoveryOperationOutcome.NotExecuted;
+            directRace.Clock.UtcNow = awaiting.PartialFillCancelAt!.Value;
+            directRace.Orders.RunDueChecksAsync(initial.IntentId).GetAwaiter().GetResult();
+            var filled = directRace.Orders.Orders.Single();
+            var position = directRace.Adapter.Positions.Single(candidate => candidate.PositionId == initial.PositionId);
+            var protection = directRace.Adapter.Protections.Single(candidate => candidate.PositionId == initial.PositionId);
+            check(filled.ManagementMode == ManagedOrderManagementMode.AwaitingOwnerChoice
+                  && filled.EntryTerminalState == ManagedEntryTerminalState.Filled
+                  && filled.FilledQuantity == fixture.Intent.Quantity && filled.RemainingQuantity == 0m
+                  && position.Quantity == fixture.Intent.Quantity
+                  && protection.TakeProfit?.Value == fixture.Intent.TakeProfit + 1m
+                  && protection.StopLoss?.Value == fixture.Intent.StopLoss - 1m
+                  && protection.TakeProfitCoveredQuantity == fixture.Intent.Quantity
+                  && protection.StopLossCoveredQuantity == fixture.Intent.Quantity
+                  && directRace.Adapter.ActionCalls.SequenceEqual(["entry", "protect", "cancel", "protect"]),
+                "a direct cancel/fill race in owner-choice mode repairs the fully grown position at the confirmed owner TP/SL");
+        }
+
+        using (var restartRace = new Harness(Path.Combine(root, "owner-full-fill-after-restart"), InitialTime))
+        {
+            restartRace.Adapter.EntryFilledQuantity = fixture.Intent.Quantity / 2m;
+            restartRace.Orders.OpenAsync(fixture.Intent, fixture.Input, savedOperatingIntent: true)
+                .GetAwaiter().GetResult();
+            var initial = restartRace.Orders.Orders.Single();
+            restartRace.Adapter.SetManualProtection(initial, fixture.Intent.TakeProfit + 1m,
+                fixture.Intent.StopLoss - 1m);
+            restartRace.Clock.UtcNow = initial.NextManagementCheckAt!.Value;
+            restartRace.Orders.RunDueChecksAsync(initial.IntentId).GetAwaiter().GetResult();
+            var awaiting = restartRace.Orders.Orders.Single();
+            restartRace.Adapter.CancelOutcome = RecoveryOperationOutcome.Unknown;
+            restartRace.Clock.UtcNow = awaiting.PartialFillCancelAt!.Value;
+            var uncertain = restartRace.Orders.RunDueChecksAsync(initial.IntentId).GetAwaiter().GetResult();
+            var pending = restartRace.Orders.Orders.Single();
+            var operation = restartRace.Recovery.State.Operations.Single(candidate =>
+                candidate.ActionKind == RecoveryActionKind.CancelOwnedOrder);
+            restartRace.Adapter.ResolveUnknownCancelToFullFill(pending, operation.OperationId);
+            restartRace.Clock.UtcNow = restartRace.Clock.UtcNow.AddSeconds(restartRace.Settings.ReadRetryDelaySeconds);
+            restartRace.Restart();
+            var reconciled = restartRace.Orders.ReconcilePendingAsync(initial.IntentId).GetAwaiter().GetResult();
+            var afterRestart = restartRace.Orders.Orders.Single();
+            var position = restartRace.Adapter.Positions.Single(candidate => candidate.PositionId == initial.PositionId);
+            var protection = restartRace.Adapter.Protections.Single(candidate => candidate.PositionId == initial.PositionId);
+            check(!uncertain.Succeeded && !reconciled.Succeeded
+                  && reconciled.Status.Contains("выбор владельца", StringComparison.OrdinalIgnoreCase)
+                  && afterRestart.PendingOperationId is null
+                  && restartRace.Adapter.ActionCalls.Count(action => action == "cancel") == 1,
+                "restart resolves the unknown cancel/fill evidence without retransmitting cancellation and leaves the owner decision open");
+            check(afterRestart.ManagementMode == ManagedOrderManagementMode.AwaitingOwnerChoice
+                  && afterRestart.EntryTerminalState == ManagedEntryTerminalState.Filled
+                  && afterRestart.PositionQuantity == fixture.Intent.Quantity
+                  && position.Quantity == fixture.Intent.Quantity,
+                "restart reconciliation saves the full filled position while preserving the owner choice");
+            check(protection.TakeProfit?.Value == fixture.Intent.TakeProfit + 1m
+                  && protection.StopLoss?.Value == fixture.Intent.StopLoss - 1m
+                  && protection.TakeProfitCoveredQuantity == fixture.Intent.Quantity
+                  && protection.StopLossCoveredQuantity == fixture.Intent.Quantity
+                  && restartRace.Adapter.ActionCalls.SequenceEqual(["entry", "protect", "cancel", "protect"]),
+                "restart reconciliation repairs full owner-level protection for the raced fill");
+        }
+
+        using (var failedRepair = new Harness(Path.Combine(root, "repair-rejected"), InitialTime))
+        {
+            failedRepair.Adapter.EntryFilledQuantity = fixture.Intent.Quantity / 2m;
+            failedRepair.Orders.OpenAsync(fixture.Intent, fixture.Input, savedOperatingIntent: true)
+                .GetAwaiter().GetResult();
+            var state = failedRepair.Orders.Orders.Single();
+            failedRepair.Adapter.SetManualProtection(state, fixture.Intent.TakeProfit + 1m,
+                fixture.Intent.StopLoss - 1m);
+            failedRepair.Adapter.AddPartialFill(state, fixture.Intent.Quantity / 4m);
+            failedRepair.Adapter.ProtectionOutcome = RecoveryOperationOutcome.NotExecuted;
+            failedRepair.Clock.UtcNow = state.NextManagementCheckAt!.Value;
+            failedRepair.Orders.RunDueChecksAsync(state.IntentId).GetAwaiter().GetResult();
+            var after = failedRepair.Orders.Orders.Single();
+            check(after.Status == ManagedOrderStatus.Closed && after.PositionQuantity == 0m
+                  && failedRepair.Adapter.CloseRequests.Single().Quantity == fixture.Intent.Quantity * 3m / 4m
+                  && failedRepair.Adapter.ActionCalls.SequenceEqual(["entry", "protect", "protect", "cancel", "close"]),
+                "only a confirmed failed repair invokes A's exact cancel and emergency-close path for the grown quantity");
+        }
+
+        using (var absentLevels = new Harness(Path.Combine(root, "ambiguous-owner-levels"), InitialTime))
+        {
+            absentLevels.Adapter.EntryFilledQuantity = fixture.Intent.Quantity / 2m;
+            absentLevels.Orders.OpenAsync(fixture.Intent, fixture.Input, savedOperatingIntent: true)
+                .GetAwaiter().GetResult();
+            var state = absentLevels.Orders.Orders.Single();
+            absentLevels.Adapter.SetIncompleteManualProtection(state, fixture.Intent.StopLoss - 1m);
+            absentLevels.Clock.UtcNow = state.NextManagementCheckAt!.Value;
+            var result = absentLevels.Orders.RunDueChecksAsync(state.IntentId).GetAwaiter().GetResult();
+            var paused = absentLevels.Orders.Orders.Single();
+            check(!result.Succeeded && paused.ManagementMode == ManagedOrderManagementMode.AwaitingOwnerChoice
+                  && paused.Status == ManagedOrderStatus.OwnershipAmbiguous
+                  && paused.PendingOwnerTakeProfit is null && paused.LastFailure is not null
+                  && absentLevels.Adapter.ActionCalls.SequenceEqual(["entry", "protect"]),
+                "missing owner TP levels require reconciliation and cannot trigger a protection or cancellation action");
+        }
+    }
+
+    private static void CheckTransferAndPendingOutcome(Action<bool, string> check, string root)
+    {
+        var fixture = CreateIntent("Limit", InitialTime);
+        using (var transferred = new Harness(Path.Combine(root, "transfer"), InitialTime))
+        {
+            transferred.Adapter.EntryFilledQuantity = fixture.Intent.Quantity / 2m;
+            transferred.Orders.OpenAsync(fixture.Intent, fixture.Input, savedOperatingIntent: true)
+                .GetAwaiter().GetResult();
+            var state = transferred.Orders.Orders.Single();
+            transferred.Adapter.SetManualProtection(state, fixture.Intent.TakeProfit + 1m,
+                fixture.Intent.StopLoss - 1m);
+            transferred.Clock.UtcNow = state.NextManagementCheckAt!.Value;
+            transferred.Orders.RunDueChecksAsync(state.IntentId).GetAwaiter().GetResult();
+            state = transferred.Orders.Orders.Single();
+            var revision = state.Revision;
+            var choice = transferred.Orders.TransferToManualAsync(state.IntentId).GetAwaiter().GetResult();
+            var manual = transferred.Orders.Orders.Single();
+            var calls = transferred.Adapter.ActionCalls.ToArray();
+            transferred.Orders.CancelRemainderAsync(state.IntentId, savedOperatingIntent: false).GetAwaiter().GetResult();
+            transferred.Orders.RepairProtectionAsync(state.IntentId, savedOperatingIntent: false).GetAwaiter().GetResult();
+            transferred.Orders.RunDueChecksAsync(state.IntentId).GetAwaiter().GetResult();
+            transferred.Orders.StopAsync().GetAwaiter().GetResult();
+            check(choice.Succeeded && manual.ManagementMode == ManagedOrderManagementMode.Manual
+                  && manual.Revision == revision + 1
+                  && manual.TransferredPositionQuantity == fixture.Intent.Quantity / 2m
+                  && manual.TransferredRemainderQuantity == fixture.Intent.Quantity / 2m
+                  && manual.RemainingQuantity == fixture.Intent.Quantity / 2m
+                  && transferred.Orders.Orders.Single().ManagementMode == ManagedOrderManagementMode.Manual
+                  && transferred.Adapter.ActionCalls.SequenceEqual(calls),
+                "Transfer saves position and exact remainder once and blocks all later application mutations");
+        }
+
+        using var pendingTransfer = new Harness(Path.Combine(root, "pending-transfer"), InitialTime);
+        pendingTransfer.Adapter.EntryFilledQuantity = fixture.Intent.Quantity / 2m;
+        pendingTransfer.Orders.OpenAsync(fixture.Intent, fixture.Input, savedOperatingIntent: true)
+            .GetAwaiter().GetResult();
+        var pendingState = pendingTransfer.Orders.Orders.Single();
+        pendingTransfer.Adapter.CancelOutcome = RecoveryOperationOutcome.Unknown;
+        var unknown = pendingTransfer.Orders.CancelRemainderAsync(pendingState.IntentId,
+            savedOperatingIntent: false).GetAwaiter().GetResult();
+        pendingState = pendingTransfer.Orders.Orders.Single();
+        var operation = pendingTransfer.Recovery.State.Operations.Single(candidate =>
+            candidate.ActionKind == RecoveryActionKind.CancelOwnedOrder);
+        var transfer = pendingTransfer.Orders.TransferToManualAsync(pendingState.IntentId).GetAwaiter().GetResult();
+        var afterTransfer = pendingTransfer.Orders.Orders.Single();
+        pendingTransfer.Adapter.ResolveUnknownCancel(afterTransfer, operation.OperationId);
+        pendingTransfer.Clock.UtcNow = InitialTime.AddSeconds(pendingTransfer.Settings.ReadRetryDelaySeconds);
+        pendingTransfer.Restart();
+        var reconciled = pendingTransfer.Orders.ReconcilePendingAsync(afterTransfer.IntentId).GetAwaiter().GetResult();
+        var afterReconcile = pendingTransfer.Orders.Orders.Single();
+        check(!unknown.Succeeded && transfer.Succeeded && reconciled.Succeeded
+              && afterReconcile.ManagementMode == ManagedOrderManagementMode.Manual
+              && afterReconcile.EntryTerminalState == ManagedEntryTerminalState.Cancelled
+              && afterReconcile.TransferredPositionQuantity == fixture.Intent.Quantity / 2m
+              && afterReconcile.TransferredRemainderQuantity == 0m
+              && pendingTransfer.Adapter.ActionCalls.SequenceEqual(["entry", "protect", "cancel"]),
+            "an already sent cancel is reconciled after transfer, updates the risk record, and sends no dependent action");
+    }
+
+    private static void CheckAmbiguousRemainderBlocksDueMutation(Action<bool, string> check, string root)
+    {
+        var fixture = CreateIntent("Limit", InitialTime);
+        using var harness = new Harness(root, InitialTime);
+        harness.Adapter.EntryFilledQuantity = fixture.Intent.Quantity / 2m;
+        harness.Orders.OpenAsync(fixture.Intent, fixture.Input, savedOperatingIntent: true)
+            .GetAwaiter().GetResult();
+        var state = harness.Orders.Orders.Single();
+        harness.Adapter.MakeRemainderOwnershipUnknown();
+        harness.Clock.UtcNow = state.PartialFillCancelAt!.Value;
+        var result = harness.Orders.RunDueChecksAsync(state.IntentId).GetAwaiter().GetResult();
+        var paused = harness.Orders.Orders.Single();
+        check(!result.Succeeded && paused.Status == ManagedOrderStatus.OwnershipAmbiguous
+              && paused.LastFailure is not null && harness.Adapter.ActionCalls.SequenceEqual(["entry", "protect"]),
+            "an ambiguous remainder owner pauses on fresh evidence and never sends cancellation or protection");
     }
 
     private static void CheckEmergencyCloseNoticeAfterRestart(Action<bool, string> check, string root)
@@ -588,6 +1410,40 @@ internal static class OrderLifecycleChecks
                   && !again.Succeeded && permanent.Adapter.ActionCalls.Count(action => action == "entry") == 1
                   && !permanent.Recovery.IsEntryAllowed(Venue, savedOperatingIntent: true),
                 "a permanent close rejection pauses safely, stays outside the retry timer and keeps the entry gate closed");
+
+            var callsWhilePaused = permanent.Adapter.ActionCalls.ToArray();
+            permanent.Restart();
+            permanent.Clock.UtcNow = paused.NextManagementCheckAt!.Value;
+            permanent.Adapter.StaleSnapshot = true;
+            permanent.Orders.RunDueChecksAsync(paused.IntentId).GetAwaiter().GetResult();
+            var afterStalePoll = permanent.Orders.Orders.Single();
+            permanent.Adapter.StaleSnapshot = false;
+            var stop = permanent.Orders.StopAsync().GetAwaiter().GetResult();
+            var afterStop = permanent.Orders.Orders.Single();
+            check(afterStalePoll.Status == ManagedOrderStatus.EmergencyClosePaused
+                  && afterStalePoll.NextEmergencyCloseAt is null
+                  && afterStalePoll.EmergencyCloseRetryability == RecoveryRetryability.Permanent
+                  && afterStop.Status == ManagedOrderStatus.EmergencyClosePaused && !stop.Succeeded
+                  && permanent.Adapter.ActionCalls.SequenceEqual(callsWhilePaused),
+                "restart, a temporary read pause, and Stop preserve permanent emergency pause without retrying close or protection");
+
+            var tpId = "verified-paused-tp";
+            var slId = "verified-paused-sl";
+            var withLevels = permanent.Recovery.SaveManagedOrderAsync(afterStop with
+            {
+                TakeProfitOrderId = tpId,
+                StopLossOrderId = slId
+            }).GetAwaiter().GetResult() ?? throw new InvalidOperationException("Paused TP/SL fixture did not persist.");
+            permanent.Adapter.SetSoftwareProtection(withLevels, tpId, slId);
+            permanent.Adapter.CloseByTakeProfit(withLevels);
+            permanent.Clock.UtcNow = withLevels.NextManagementCheckAt!.Value;
+            var flat = permanent.Orders.RunDueChecksAsync(withLevels.IntentId).GetAwaiter().GetResult();
+            var closed = permanent.Orders.Orders.Single();
+            check(flat.Succeeded && closed.Status == ManagedOrderStatus.Closed
+                  && closed.TakeProfitClosedQuantity == fixture.Intent.Quantity
+                  && closed.EmergencyCloseRetriesUsed == 0
+                  && permanent.Adapter.ActionCalls.SequenceEqual(callsWhilePaused),
+                "a verified TP closure is processed from emergency pause without issuing a repair or reduce-only retry");
         }
 
         using (var authorization = new Harness(Path.Combine(root, "authorization"), InitialTime))
@@ -601,6 +1457,17 @@ internal static class OrderLifecycleChecks
             check(paused.Status == ManagedOrderStatus.EmergencyClosePaused
                   && paused.NextEmergencyCloseAt is null && paused.EmergencyCloseRetriesUsed == 0,
                 "authorization failures require manual recovery and never enter the automated close retry loop");
+            var calls = authorization.Adapter.ActionCalls.ToArray();
+            authorization.Clock.UtcNow = paused.NextManagementCheckAt!.Value;
+            authorization.Orders.RunDueChecksAsync(paused.IntentId).GetAwaiter().GetResult();
+            authorization.Restart();
+            authorization.Orders.StopAsync().GetAwaiter().GetResult();
+            var afterStop = authorization.Orders.Orders.Single();
+            check(afterStop.Status == ManagedOrderStatus.EmergencyClosePaused
+                  && afterStop.EmergencyCloseRetryability == RecoveryRetryability.AuthorizationRequired
+                  && afterStop.NextEmergencyCloseAt is null
+                  && authorization.Adapter.ActionCalls.SequenceEqual(calls),
+                "normal polling, restart, and Stop preserve the authorization pause without another close or protection attempt");
         }
 
         using (var unknownReason = new Harness(Path.Combine(root, "unknown-reason"), InitialTime))
@@ -614,6 +1481,57 @@ internal static class OrderLifecycleChecks
                   && paused.EmergencyCloseRetryability == RecoveryRetryability.Unknown
                   && paused.NextEmergencyCloseAt is null && paused.EmergencyCloseRetriesUsed == 0,
                 "a close rejection without an explicit retryable cause uses the safe no-retry default");
+        }
+
+        using (var waiting = new Harness(Path.Combine(root, "waiting-poll"), InitialTime, settings =>
+        {
+            settings.PositionCheckMinutes = 1;
+            settings.EmergencyCloseRetryDelaySeconds = 300;
+        }))
+        {
+            waiting.Adapter.ProtectionOutcome = RecoveryOperationOutcome.NotExecuted;
+            waiting.Adapter.CloseOutcome = RecoveryOperationOutcome.NotExecuted;
+            waiting.Adapter.CloseRetryability = RecoveryRetryability.Retryable;
+            waiting.Orders.OpenAsync(fixture.Intent, fixture.Input, savedOperatingIntent: true)
+                .GetAwaiter().GetResult();
+            var scheduled = waiting.Orders.Orders.Single();
+            var retryAt = scheduled.NextEmergencyCloseAt;
+            var calls = waiting.Adapter.ActionCalls.ToArray();
+            waiting.Clock.UtcNow = scheduled.NextManagementCheckAt!.Value;
+            waiting.Orders.RunDueChecksAsync(scheduled.IntentId).GetAwaiter().GetResult();
+            var polled = waiting.Orders.Orders.Single();
+            waiting.Adapter.StaleSnapshot = true;
+            waiting.Clock.UtcNow = polled.NextManagementCheckAt!.Value;
+            waiting.Orders.RunDueChecksAsync(polled.IntentId).GetAwaiter().GetResult();
+            var stale = waiting.Orders.Orders.Single();
+            waiting.Adapter.StaleSnapshot = false;
+            waiting.Restart();
+            waiting.Clock.UtcNow = retryAt!.Value.AddMinutes(-1);
+            waiting.Orders.RunDueChecksAsync(stale.IntentId).GetAwaiter().GetResult();
+            var afterRestart = waiting.Orders.Orders.Single();
+            check(polled.Status == ManagedOrderStatus.EmergencyCloseWaiting,
+                "normal polling preserves the retryable emergency status");
+            check(polled.NextEmergencyCloseAt == retryAt,
+                "normal polling preserves the retryable emergency deadline");
+            check(waiting.Adapter.ActionCalls.SequenceEqual(calls),
+                "normal polling does not send another protection or close action");
+            check(stale.Status == ManagedOrderStatus.EmergencyCloseWaiting
+                  && stale.NextEmergencyCloseAt == retryAt
+                  && waiting.Adapter.ActionCalls.SequenceEqual(calls),
+                "a temporary read failure preserves the retryable emergency schedule without protection retries");
+            check(afterRestart.Status == ManagedOrderStatus.EmergencyCloseWaiting
+                  && afterRestart.NextEmergencyCloseAt == retryAt
+                  && waiting.Adapter.ActionCalls.SequenceEqual(calls),
+                "restart preserves the retryable emergency schedule without protection retries");
+            waiting.Clock.UtcNow = retryAt!.Value;
+            waiting.Adapter.CloseOutcome = RecoveryOperationOutcome.Confirmed;
+            var due = waiting.Orders.RunDueChecksAsync(stale.IntentId).GetAwaiter().GetResult();
+            var closed = waiting.Orders.Orders.Single();
+            check(due.Succeeded && closed.Status == ManagedOrderStatus.Closed
+                  && waiting.Adapter.ActionCalls.Count(action => action == "close") == 2
+                  && waiting.Adapter.ActionCalls.Count(action => action == "protect") == 1
+                  && waiting.Adapter.CloseRequests.Last().Quantity == fixture.Intent.Quantity,
+                "the persisted retry deadline routes through the existing exact emergency-close gate");
         }
 
         using (var restart = new Harness(Path.Combine(root, "unknown-then-retryable"), InitialTime))
@@ -745,18 +1663,83 @@ internal static class OrderLifecycleChecks
                 : AccountSection<IReadOnlyList<ClosedTrade>>.ConfirmedEmpty(Array.Empty<ClosedTrade>(), now,
                     "controlled order fixture"));
 
+    private static void Focus(FrameworkElement element)
+    {
+        element.BringIntoView();
+        PumpDispatcher();
+        if (!ReferenceEquals(Keyboard.Focus(element), element))
+            throw new InvalidOperationException($"Could not focus WPF control: {element.Name}");
+        PumpDispatcher();
+    }
+
+    private static void ScrollLifecyclePanelIntoView(Window window, AccountDashboardView dashboard)
+    {
+        dashboard.OrderLifecyclePanelElement.BringIntoView();
+        window.UpdateLayout();
+        if (window.FindName("MainScrollViewer") is ScrollViewer scrollViewer)
+            scrollViewer.ScrollToVerticalOffset(Math.Min(scrollViewer.ScrollableHeight,
+                scrollViewer.VerticalOffset + 80));
+        window.UpdateLayout();
+        PumpDispatcher();
+    }
+
+    private static void InvokeButton(Button button)
+    {
+        if (!button.IsVisible || !button.IsEnabled)
+            throw new InvalidOperationException($"Cannot invoke hidden or disabled WPF button: {button.Name}");
+        var peer = UIElementAutomationPeer.CreatePeerForElement(button)
+            ?? throw new InvalidOperationException($"WPF automation peer not found: {button.Name}");
+        var invoke = peer.GetPattern(PatternInterface.Invoke) as IInvokeProvider
+            ?? throw new InvalidOperationException($"WPF InvokePattern unavailable: {button.Name}");
+        invoke.Invoke();
+    }
+
+    private static void RenderWindow(Window window, string path)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var bitmap = new RenderTargetBitmap((int)Math.Ceiling(window.ActualWidth),
+            (int)Math.Ceiling(window.ActualHeight), 96, 96, PixelFormats.Pbgra32);
+        bitmap.Render(window);
+        var encoder = new PngBitmapEncoder();
+        encoder.Frames.Add(BitmapFrame.Create(bitmap));
+        using var stream = File.Create(path);
+        encoder.Save(stream);
+        if (new FileInfo(path).Length == 0)
+            throw new InvalidOperationException($"WPF screenshot is empty: {path}");
+    }
+
+    private static void PumpDispatcher()
+    {
+        var frame = new DispatcherFrame();
+        Dispatcher.CurrentDispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle,
+            new Action(() => frame.Continue = false));
+        Dispatcher.PushFrame(frame);
+    }
+
+    private static string ArtifactsDirectory()
+    {
+        for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null;
+             directory = directory.Parent)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "plans", "009-orders-and-protection.md")))
+                return Path.Combine(directory.FullName, "artifacts", "009-orders-and-protection");
+        }
+        return Path.Combine(AppContext.BaseDirectory, "verification-artifacts", "009-orders-and-protection");
+    }
+
     private sealed class Harness : IDisposable
     {
         private readonly string _journalPath;
         private readonly RecoveryJournalStore _store;
 
-        internal Harness(string root, DateTimeOffset now)
+        internal Harness(string root, DateTimeOffset now, Action<AppSettings>? configureSettings = null)
         {
             Directory.CreateDirectory(root);
             _journalPath = Path.Combine(root, "recovery-state.json");
             _store = new RecoveryJournalStore(_journalPath);
             Clock = new FakeClock(now);
             Settings = new AppSettings();
+            configureSettings?.Invoke(Settings);
             Adapter = new ControlledAdapter(Clock);
             StartServices();
         }
@@ -829,6 +1812,10 @@ internal static class OrderLifecycleChecks
         public RecoveryOperationOutcome CancelOutcome { get; set; } = RecoveryOperationOutcome.Confirmed;
         public RecoveryOperationOutcome CloseOutcome { get; set; } = RecoveryOperationOutcome.Confirmed;
         public RecoveryRetryability CloseRetryability { get; set; } = RecoveryRetryability.Unknown;
+        public bool OmitFirstFillTime { get; set; }
+        public DateTimeOffset? EntryHistoryFirstFillAt { get; set; }
+        public bool EntryFillHistoryComplete { get; set; }
+        private string? _entryOrderId;
 
         internal void Bind(RecoveryCoordinator recovery, RecoveryJournalStore store)
         {
@@ -852,6 +1839,9 @@ internal static class OrderLifecycleChecks
                         new MoneyAmount(1000m, "USDC"), new MoneyAmount(1000m, "USDC"),
                         new MoneyAmount(151m, "USDC")), observedAt, "controlled conflicting fixture")
                 };
+            var fillTimes = EntryHistoryFirstFillAt is { } firstFill && _entryOrderId is { } entryOrderId
+                ? new Dictionary<string, DateTimeOffset>(StringComparer.Ordinal) { [entryOrderId] = firstFill }
+                : null;
             return Task.FromResult(new RecoverySnapshotRead(true,
                 snapshot,
                 OpeningOrderRemaindersComplete: true,
@@ -859,7 +1849,9 @@ internal static class OrderLifecycleChecks
                 UnfinishedOperationsComplete: true,
                 OperationOutcomes: new Dictionary<string, RecoveryOperationObservation>(_observations,
                     StringComparer.Ordinal),
-                ClosedPositionHistoryComplete: true));
+                ClosedPositionHistoryComplete: true,
+                EntryFirstFillTimes: fillTimes,
+                EntryFillHistoryComplete: EntryFillHistoryComplete));
         }
 
         public Task<RecoveryOperationOutcome> SubmitEntryAsync(
@@ -978,6 +1970,108 @@ internal static class OrderLifecycleChecks
 
         internal void ClearProtection() => _protections.Clear();
 
+        internal void SetManualProtection(
+            ManagedOrderState intent,
+            decimal takeProfit,
+            decimal stopLoss,
+            decimal? takeProfitCoverage = null,
+            decimal? stopLossCoverage = null)
+        {
+            var position = _positions.Single(candidate => candidate.PositionId == intent.PositionId);
+            _protections.RemoveAll(candidate => candidate.PositionId == position.PositionId);
+            _protections.Add(new PositionProtection(intent.Contract,
+                new MoneyAmount(takeProfit, "USDC"), new MoneyAmount(stopLoss, "USDC"),
+                position.PositionId, PositionOwnership.Manual,
+                takeProfitCoverage ?? position.Quantity, stopLossCoverage ?? position.Quantity,
+                "manual-tp-" + position.PositionId, "manual-sl-" + position.PositionId));
+        }
+
+        internal void SetSoftwareProtection(
+            ManagedOrderState intent,
+            string takeProfitOrderId,
+            string stopLossOrderId)
+        {
+            var position = _positions.Single(candidate => candidate.PositionId == intent.PositionId);
+            _protections.RemoveAll(candidate => candidate.PositionId == position.PositionId);
+            _protections.Add(new PositionProtection(intent.Contract,
+                new MoneyAmount(intent.TakeProfit, "USDC"), new MoneyAmount(intent.StopLoss, "USDC"),
+                position.PositionId, PositionOwnership.SoftwareOwned, position.Quantity, position.Quantity,
+                takeProfitOrderId, stopLossOrderId));
+        }
+
+        internal void SetIncompleteManualProtection(ManagedOrderState intent, decimal stopLoss)
+        {
+            var position = _positions.Single(candidate => candidate.PositionId == intent.PositionId);
+            _protections.RemoveAll(candidate => candidate.PositionId == position.PositionId);
+            _protections.Add(new PositionProtection(intent.Contract, null, new MoneyAmount(stopLoss, "USDC"),
+                position.PositionId, PositionOwnership.Manual, position.Quantity, position.Quantity,
+                "manual-tp-" + position.PositionId, "manual-sl-" + position.PositionId));
+        }
+
+        internal void AddPartialFill(ManagedOrderState intent, decimal quantity)
+        {
+            var orderIndex = _orders.FindIndex(candidate => candidate.OrderId == intent.EntryOrderId);
+            var positionIndex = _positions.FindIndex(candidate => candidate.PositionId == intent.PositionId);
+            var order = _orders[orderIndex];
+            var position = _positions[positionIndex];
+            if (quantity <= 0m || quantity >= order.RemainingQuantity)
+                throw new ArgumentOutOfRangeException(nameof(quantity));
+            _orders[orderIndex] = order with
+            {
+                FilledQuantity = order.FilledQuantity + quantity,
+                Status = "Open"
+            };
+            _positions[positionIndex] = position with { Quantity = position.Quantity + quantity };
+        }
+
+        internal void CompleteLimitFillDuringMonitoring(ManagedOrderState intent)
+        {
+            if (intent.EntryOrderId is not { } orderId
+                || intent.OriginEntryOperationId is not { } operationId)
+                throw new InvalidOperationException("The controlled Limit fill requires a persisted entry identity.");
+            var order = _orders.Single(candidate => candidate.OrderId == orderId);
+            var positionIndex = _positions.FindIndex(candidate => candidate.Contract == intent.Contract);
+            if (order.FilledQuantity >= intent.Quantity)
+                throw new InvalidOperationException("The controlled Limit order cannot transition to full fill.");
+            var positionId = intent.PositionId ?? "position-" + intent.IntentId[..8];
+            _orders.Remove(order);
+            if (positionIndex >= 0)
+                _positions[positionIndex] = _positions[positionIndex] with { Quantity = intent.Quantity };
+            else
+                _positions.Add(new OpenPosition(intent.Asset, intent.Contract, intent.Direction, intent.Quantity,
+                    "contract", new MoneyAmount(0m, "USDC"), PositionOwnership.SoftwareOwned,
+                    "controlled full Limit fill", positionId, [orderId]));
+            var prior = _observations[operationId];
+            _observations[operationId] = prior with
+            {
+                Outcome = RecoveryOperationOutcome.Confirmed,
+                OrderId = orderId,
+                PositionId = positionId,
+                Direction = intent.Direction,
+                FilledQuantity = intent.Quantity,
+                RemainingQuantity = 0m,
+                PositionQuantity = intent.Quantity,
+                EntryOrderState = ManagedEntryTerminalState.Filled
+            };
+        }
+
+        internal void CorruptOriginEntryPositionId(ManagedOrderState intent, string positionId)
+        {
+            if (intent.OriginEntryOperationId is not { } operationId)
+                throw new InvalidOperationException("The controlled Limit fill has no persisted entry operation.");
+            _observations[operationId] = _observations[operationId] with { PositionId = positionId };
+        }
+
+        internal void RemoveEntryOrderWithoutTerminalEvidence()
+        {
+            if (_orders.Count == 0)
+                throw new InvalidOperationException("No controlled open order exists to remove.");
+            _orders.RemoveAt(0);
+        }
+
+        internal void MakeRemainderOwnershipUnknown() =>
+            _orders[0] = _orders[0] with { Ownership = PositionOwnership.Unknown };
+
         internal void SetPositions(IEnumerable<OpenPosition> positions)
         {
             _positions.Clear();
@@ -1068,6 +2162,18 @@ internal static class OrderLifecycleChecks
                 position.Quantity, PositionOwnership.SoftwareOwned, false, TradeCloseKind.TakeProfit));
         }
 
+        internal void CloseByStopLoss(ManagedOrderState intent)
+        {
+            var position = _positions.Single(candidate => candidate.PositionId == intent.PositionId);
+            var protection = _protections.Single(candidate => candidate.PositionId == intent.PositionId);
+            _positions.Remove(position);
+            _protections.Remove(protection);
+            _closedTrades.Add(new ClosedTrade(intent.Asset, intent.Contract, intent.Direction,
+                intent.CreatedAt, clock.UtcNow, new MoneyAmount(0m, "USDC"), "Stop loss",
+                position.PositionId, [intent.EntryOrderId!], protection.StopLossOrderId,
+                position.Quantity, PositionOwnership.SoftwareOwned, false, TradeCloseKind.StopLoss));
+        }
+
         private void RecordFullFillDuringCancel(
             ManagedOrderState intent,
             OpenOrder order,
@@ -1098,6 +2204,7 @@ internal static class OrderLifecycleChecks
             _orders.Clear();
             _protections.Clear();
             var orderId = "order-" + intent.IntentId[..8];
+            _entryOrderId = orderId;
             var positionId = filledQuantity == 0m ? null : "position-" + intent.IntentId[..8];
             var remaining = outcome == RecoveryOperationOutcome.NotExecuted
                 ? 0m : intent.Quantity - filledQuantity;
@@ -1116,7 +2223,8 @@ internal static class OrderLifecycleChecks
                 filledQuantity == 0m ? null : filledQuantity,
                 EntryOrderState: outcome == RecoveryOperationOutcome.NotExecuted
                     ? ManagedEntryTerminalState.Rejected
-                    : remaining > 0m ? ManagedEntryTerminalState.Open : ManagedEntryTerminalState.Filled);
+                    : remaining > 0m ? ManagedEntryTerminalState.Open : ManagedEntryTerminalState.Filled,
+                FirstFillAt: filledQuantity > 0m && !OmitFirstFillTime ? clock.UtcNow : null);
         }
 
         private void BeforeCallback(string action, string operationId)

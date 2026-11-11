@@ -46,6 +46,7 @@ internal static class Program
             if (orderLifecycleOnly)
             {
                 OrderLifecycleChecks.CheckCore(Check, fixtureRoot);
+                OrderLifecycleChecks.CheckNativeWpf(Check, fixtureRoot);
                 Console.WriteLine($"PASS: {_checks} order-lifecycle assertions (--order-lifecycle)");
                 return 0;
             }
@@ -85,6 +86,7 @@ internal static class Program
             AccountReadChecks.CheckCore(Check);
             EntryEligibilityChecks.CheckCore(Check);
             OrderLifecycleChecks.CheckCore(Check, fixtureRoot);
+            OrderLifecycleChecks.CheckNativeWpf(Check, fixtureRoot);
             RecoveryChecks.CheckCore(Check, fixtureRoot);
             ProcessRecoveryChecks.CheckCore(Check, fixtureRoot);
             ProcessRecoveryChecks.CheckRuntime(Check, fixtureRoot);
@@ -351,8 +353,14 @@ internal static class Program
         Check(store.Save(initial).Succeeded, "isolated WPF fixture is prepared");
         var originalSettings = SettingsValidator.Validate(initial).Profile.Settings.Copy();
 
-        var app = new App();
-        app.InitializeComponent();
+        var app = Application.Current as App;
+        if (app is null)
+        {
+            if (Application.Current is not null)
+                throw new InvalidOperationException("A non-TradeFlow WPF application is already active in this verification process.");
+            app = new App();
+            app.InitializeComponent();
+        }
         var appliedRequests = new List<bool>();
         var controller = new WakeProtectionController(false, value => { appliedRequests.Add(value); return true; });
         var session = new TrueNorthSessionChecks.RecordingSessionService();
