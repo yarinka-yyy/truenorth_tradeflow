@@ -23,6 +23,7 @@ internal static class Program
 
         var entryEligibilityOnly = args.Contains("--entry-eligibility", StringComparer.Ordinal);
         var recoveryOnly = args.Contains("--notifications-recovery", StringComparer.Ordinal);
+        var orderLifecycleOnly = args.Contains("--order-lifecycle", StringComparer.Ordinal);
         var processRecoveryRuntimeOnly = args.Contains("--process-recovery-runtime", StringComparer.Ordinal);
         var fixtureRoot = Path.Combine(ArtifactsDirectory(), ".fixtures", Guid.NewGuid().ToString("N"));
         try
@@ -40,6 +41,12 @@ internal static class Program
                 EntryEligibilityChecks.CheckCore(Check);
                 EntryEligibilityChecks.CheckNativeWpf(Check, fixtureRoot);
                 Console.WriteLine($"PASS: {_checks} entry-eligibility assertions (--entry-eligibility)");
+                return 0;
+            }
+            if (orderLifecycleOnly)
+            {
+                OrderLifecycleChecks.CheckCore(Check, fixtureRoot);
+                Console.WriteLine($"PASS: {_checks} order-lifecycle assertions (--order-lifecycle)");
                 return 0;
             }
             if (recoveryOnly)
@@ -77,6 +84,7 @@ internal static class Program
             AiTestChecks.CheckCore(Check, fixtureRoot);
             AccountReadChecks.CheckCore(Check);
             EntryEligibilityChecks.CheckCore(Check);
+            OrderLifecycleChecks.CheckCore(Check, fixtureRoot);
             RecoveryChecks.CheckCore(Check, fixtureRoot);
             ProcessRecoveryChecks.CheckCore(Check, fixtureRoot);
             ProcessRecoveryChecks.CheckRuntime(Check, fixtureRoot);
@@ -93,7 +101,7 @@ internal static class Program
         finally
         {
             CultureInfo.CurrentCulture = originalCulture;
-            if (entryEligibilityOnly || recoveryOnly || processRecoveryRuntimeOnly)
+            if (entryEligibilityOnly || recoveryOnly || orderLifecycleOnly || processRecoveryRuntimeOnly)
                 Application.Current?.Shutdown();
             try
             {

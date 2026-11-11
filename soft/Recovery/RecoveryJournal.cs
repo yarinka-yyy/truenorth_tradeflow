@@ -3,6 +3,7 @@ using System.Security;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using TrueNorth.TradeFlow.Notifications;
+using TrueNorth.TradeFlow.Orders;
 
 namespace TrueNorth.TradeFlow.Recovery;
 
@@ -76,7 +77,9 @@ internal sealed record RecoveryOperation(
     [property: JsonRequired] DateTimeOffset? CompletedAt,
     [property: JsonRequired] DateTimeOffset? ReconciledAt,
     [property: JsonRequired] RecoveryOperationStage Stage,
-    [property: JsonRequired] string? Outcome);
+    [property: JsonRequired] string? Outcome,
+    RecoveryActionKind ActionKind = RecoveryActionKind.Entry,
+    RecoveryRetryability Retryability = RecoveryRetryability.Unknown);
 
 internal sealed record RecoveryEvent(
     [property: JsonRequired] string EventId,
@@ -104,6 +107,7 @@ internal sealed record RecoveryJournalState
 {
     public List<RecoveryVenueState> Venues { get; init; } = [];
     public List<RecoveryOperation> Operations { get; init; } = [];
+    public List<ManagedOrderState> ManagedOrders { get; init; } = [];
     public List<RecoveryEvent> Events { get; init; } = [];
     public List<NotificationDeliveryAttempt> NotificationAttempts { get; init; } = [];
     public DateTimeOffset? TelegramRetryAfterAt { get; init; }
@@ -344,7 +348,7 @@ internal sealed class RecoveryJournalStore
     private static bool Validate(RecoveryJournalState? state, out string? error)
     {
         error = null;
-        if (state?.Venues is null || state.Operations is null || state.Events is null
+        if (state?.Venues is null || state.Operations is null || state.ManagedOrders is null || state.Events is null
             || state.NotificationAttempts is null)
         {
             error = "Журнал восстановления содержит отсутствующий список.";
@@ -384,6 +388,8 @@ internal sealed class RecoveryJournalStore
                 || string.IsNullOrWhiteSpace(operation.Account)
                 || string.IsNullOrWhiteSpace(operation.Market)
                 || string.IsNullOrWhiteSpace(operation.Operation)
+                || !Enum.IsDefined(operation.ActionKind)
+                || !Enum.IsDefined(operation.Retryability)
                 || !Enum.IsDefined(operation.Stage))
             || state.Operations.Select(operation => operation.OperationId).Distinct(StringComparer.Ordinal).Count() != state.Operations.Count
             || state.Operations.Any(operation => operation.Stage switch
@@ -409,6 +415,23 @@ internal sealed class RecoveryJournalStore
             }))
         {
             error = "Журнал восстановления содержит недопустимый или повторяющийся ключ операции.";
+            return false;
+        }
+
+        if (state.ManagedOrders.Any(order => order is null || !ManagedOrderState.IsValid(order))
+            || state.ManagedOrders.Select(order => order.IntentId).Distinct(StringComparer.Ordinal).Count()
+                != state.ManagedOrders.Count
+            || state.ManagedOrders.Where(ManagedOrderState.BlocksNewEntry)
+                .GroupBy(order => (order.Venue, order.Account, order.Contract)).Any(group => group.Count() > 1)
+            || state.ManagedOrders.Where(order => order.PendingOperationId is not null)
+                .GroupBy(order => order.PendingOperationId, StringComparer.Ordinal).Any(group => group.Count() > 1)
+            || state.ManagedOrders.Any(order => order.PendingOperationId is not null
+                && !state.Operations.Any(operation => operation.OperationId == order.PendingOperationId
+                    && operation.Venue == order.Venue && operation.Account == order.Account
+                    && operation.Market == order.Contract
+                    && operation.ActionKind == ManagedOrderState.RecoveryKind(order.PendingAction!.Value))))
+        {
+            error = "Журнал восстановления содержит недопустимое намерение или незавершённое действие ордера.";
             return false;
         }
 

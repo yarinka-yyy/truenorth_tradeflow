@@ -77,7 +77,7 @@ internal sealed class NotificationDispatcher : IDisposable
             channel.Dispose();
     }
 
-    private async Task<NotificationDispatchReport> DispatchAsync(
+    internal async Task<NotificationDispatchReport> DispatchAsync(
         NotificationMessage message,
         CancellationToken cancellationToken)
     {

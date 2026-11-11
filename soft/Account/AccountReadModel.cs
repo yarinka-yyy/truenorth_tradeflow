@@ -38,7 +38,10 @@ public sealed record OpenPosition(
     string QuantityUnit,
     MoneyAmount? UnrealizedPnl,
     PositionOwnership Ownership,
-    string OwnershipNote);
+    string OwnershipNote,
+    string? PositionId = null,
+    IReadOnlyCollection<string>? OrderIds = null,
+    bool HasMixedExecution = false);
 
 public sealed record OpenOrder(
     string Asset,
@@ -49,7 +52,9 @@ public sealed record OpenOrder(
     string QuantityUnit,
     string Status,
     PositionOwnership Ownership,
-    string ProtectionStatus)
+    string ProtectionStatus,
+    string? OrderId = null,
+    string? OperationId = null)
 {
     public decimal? RemainingQuantity => TotalQuantity >= FilledQuantity
         ? TotalQuantity - FilledQuantity
@@ -59,7 +64,13 @@ public sealed record OpenOrder(
 public sealed record PositionProtection(
     string Contract,
     MoneyAmount? TakeProfit,
-    MoneyAmount? StopLoss);
+    MoneyAmount? StopLoss,
+    string? PositionId = null,
+    PositionOwnership Ownership = PositionOwnership.Unknown,
+    decimal? TakeProfitCoveredQuantity = null,
+    decimal? StopLossCoveredQuantity = null,
+    string? TakeProfitOrderId = null,
+    string? StopLossOrderId = null);
 
 public sealed record ClosedTrade(
     string Asset,
@@ -68,7 +79,23 @@ public sealed record ClosedTrade(
     DateTimeOffset OpenedAt,
     DateTimeOffset ClosedAt,
     MoneyAmount? RealizedPnl,
-    string? CloseReason);
+    string? CloseReason,
+    string? PositionId = null,
+    IReadOnlyCollection<string>? EntryOrderIds = null,
+    string? CloseOrderId = null,
+    decimal? ClosedQuantity = null,
+    PositionOwnership Ownership = PositionOwnership.Unknown,
+    bool HasMixedExecution = false,
+    TradeCloseKind CloseKind = TradeCloseKind.Unknown);
+
+public enum TradeCloseKind
+{
+    Unknown,
+    TakeProfit,
+    StopLoss,
+    Manual,
+    Other
+}
 
 public sealed record ExposureIdentity(
     string Venue,

@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using TrueNorth.TradeFlow.Notifications;
 using TrueNorth.TradeFlow.Account;
+using TrueNorth.TradeFlow.Orders;
 
 namespace TrueNorth.TradeFlow.Recovery;
 
@@ -21,6 +22,14 @@ internal enum RecoveryOperationOutcome
     Unknown
 }
 
+internal enum RecoveryRetryability
+{
+    Unknown,
+    Retryable,
+    Permanent,
+    AuthorizationRequired
+}
+
 internal sealed record RecoverySnapshotRead(
     bool SessionAvailable,
     AccountSnapshot? Account,
@@ -28,7 +37,8 @@ internal sealed record RecoverySnapshotRead(
     bool ProtectionCoverageComplete,
     bool UnfinishedOperationsComplete,
     IReadOnlyDictionary<string, RecoveryOperationObservation>? OperationOutcomes = null,
-    string? FailureReason = null);
+    string? FailureReason = null,
+    bool ClosedPositionHistoryComplete = false);
 
 internal sealed record RecoveryOperationObservation(
     string OperationId,
@@ -36,7 +46,17 @@ internal sealed record RecoveryOperationObservation(
     string Account,
     string Market,
     string Operation,
-    RecoveryOperationOutcome Outcome);
+    RecoveryOperationOutcome Outcome,
+    string? OrderId = null,
+    string? PositionId = null,
+    PositionDirection? Direction = null,
+    decimal? FilledQuantity = null,
+    decimal? RemainingQuantity = null,
+    decimal? PositionQuantity = null,
+    string? TakeProfitOrderId = null,
+    string? StopLossOrderId = null,
+    RecoveryRetryability Retryability = RecoveryRetryability.Unknown,
+    ManagedEntryTerminalState EntryOrderState = ManagedEntryTerminalState.Unknown);
 
 internal interface IRecoverySnapshotSource
 {
@@ -50,7 +70,16 @@ internal sealed record RecoveryOperationRequest(
     string Account,
     string Market,
     string Operation,
-    DateTimeOffset? DeadlineAt = null);
+    DateTimeOffset? DeadlineAt = null,
+    RecoveryActionKind ActionKind = RecoveryActionKind.Entry);
+
+internal enum RecoveryActionKind
+{
+    Entry,
+    CancelOwnedOrder,
+    ProtectOwnedPosition,
+    EmergencyReduceOnlyClose
+}
 
 internal sealed record ConfirmedRecoveryScope(string Venue, string Account);
 
@@ -104,6 +133,7 @@ internal sealed class RecoveryCoordinator
     {
         Venues = [.. _state.Venues],
         Operations = [.. _state.Operations],
+        ManagedOrders = [.. _state.ManagedOrders],
         Events = [.. _state.Events],
         NotificationAttempts = [.. _state.NotificationAttempts],
         TelegramRetryAfterAt = _state.TelegramRetryAfterAt
@@ -165,13 +195,106 @@ internal sealed class RecoveryCoordinator
 
     internal bool IsEntryAllowed(string venue, bool savedOperatingIntent)
     {
-        if (!savedOperatingIntent || !_storageReady || string.IsNullOrWhiteSpace(venue))
+        return IsActionAllowed(venue, null, savedOperatingIntent, RecoveryActionKind.Entry);
+    }
+
+    internal bool IsActionAllowed(
+        string venue,
+        string? account,
+        bool savedOperatingIntent,
+        RecoveryActionKind actionKind,
+        string? market = null,
+        string? operationId = null)
+    {
+        if (!_storageReady || string.IsNullOrWhiteSpace(venue) || !Enum.IsDefined(actionKind)
+            || actionKind == RecoveryActionKind.Entry && !savedOperatingIntent)
             return false;
         if (_state.Venues.Any(state => state.Venue == UnknownVenue
-                || (state.Venue == venue && state.Phase != RecoveryReadPhase.Resolved)))
+                || state.Venue == venue && state.Phase == RecoveryReadPhase.UnknownScope))
+            return false;
+        var venuePauses = _state.Venues.Where(state => state.Venue == venue
+            && state.Phase != RecoveryReadPhase.Resolved).ToArray();
+        if (venuePauses.Any(state => state.Account is null || account is null || state.Account != account)
+            || actionKind == RecoveryActionKind.Entry && venuePauses.Length > 0)
+            return false;
+        var managed = _state.ManagedOrders.Where(order => order.Venue == venue
+            && (account is null || order.Account == account)
+            && (market is null || order.Contract == market)).ToArray();
+        if (managed.Any(order => order.PendingOperationId is not null
+                && order.PendingOperationId != operationId))
+            return false;
+        if (actionKind == RecoveryActionKind.Entry && managed.Any(ManagedOrderState.RequiresVenueEntryPause))
             return false;
         return !_state.Operations.Any(operation => operation.Venue == venue
             && operation.Stage is (RecoveryOperationStage.TransferStarted or RecoveryOperationStage.Unknown));
+    }
+
+    internal async Task<ManagedOrderState?> SaveManagedOrderAsync(
+        ManagedOrderState order,
+        CancellationToken cancellationToken = default)
+    {
+        if (!ManagedOrderState.IsValid(order))
+            return null;
+        await _stateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (!_storageReady || (order.PendingOperationId is not null
+                    && !_state.Operations.Any(operation => operation.OperationId == order.PendingOperationId
+                        && operation.Venue == order.Venue && operation.Account == order.Account
+                        && operation.Market == order.Contract
+                        && operation.ActionKind == ManagedOrderState.RecoveryKind(order.PendingAction!.Value))))
+                return null;
+            var orders = _state.ManagedOrders.ToList();
+            var index = orders.FindIndex(candidate => candidate.IntentId == order.IntentId);
+            ManagedOrderState saved;
+            if (index < 0)
+            {
+                if (order.Revision != 0 || order.PendingOperationId is not null)
+                    return null;
+                saved = order with { Revision = 1 };
+                if (orders.Any(existing => existing.Venue == order.Venue && existing.Account == order.Account
+                        && existing.Contract == order.Contract && ManagedOrderState.BlocksNewEntry(existing)))
+                    return null;
+                orders.Add(saved);
+            }
+            else
+            {
+                var existing = orders[index];
+                if (existing.Revision != order.Revision
+                    || existing.PendingOperationId is not null && order.PendingOperationId is null
+                        && !CanClearPendingManagedOperation(existing, order)
+                    || order.PendingOperationId is not null && existing.PendingOperationId is not null
+                        && order.PendingOperationId != existing.PendingOperationId)
+                    return null;
+                if (order.PendingOperationId is not null && orders.Any(candidate => candidate.IntentId != order.IntentId
+                        && candidate.Venue == order.Venue && candidate.Account == order.Account
+                        && candidate.Contract == order.Contract && candidate.PendingOperationId is not null))
+                    return null;
+                saved = order with { Revision = checked(existing.Revision + 1) };
+                orders[index] = saved;
+            }
+            if (!SaveState(_state with { ManagedOrders = orders }))
+                return null;
+            return saved;
+        }
+        finally
+        {
+            _stateGate.Release();
+        }
+    }
+
+    private bool CanClearPendingManagedOperation(ManagedOrderState existing, ManagedOrderState updated)
+    {
+        var operation = _state.Operations.SingleOrDefault(candidate =>
+            candidate.OperationId == existing.PendingOperationId);
+        if (operation is null)
+            return false;
+        if (operation.Stage == RecoveryOperationStage.Abandoned)
+            return updated.PendingPriorStatus is null
+                && updated.Status == (existing.PendingPriorStatus ?? ManagedOrderStatus.IntentSaved);
+        return updated.LastAppliedOperationId == existing.PendingOperationId
+            && operation.Stage is RecoveryOperationStage.Confirmed or RecoveryOperationStage.NotExecuted
+                or RecoveryOperationStage.Reconciled;
     }
 
     internal Task<NotificationAttemptStartResult> BeginNotificationAttemptAsync(
@@ -426,13 +549,14 @@ internal sealed class RecoveryCoordinator
         {
             var now = _clock.UtcNow;
             if ((request.DeadlineAt is { } deadlineAt && deadlineAt <= now)
-                || !IsEntryAllowed(request.Venue, savedOperatingIntent)
+                || !IsActionAllowed(request.Venue, request.Account, savedOperatingIntent,
+                    request.ActionKind, request.Market)
                 || _state.Operations.Any(operation => operation.OperationId == request.OperationId))
                 return false;
 
             var operation = new RecoveryOperation(request.OperationId, request.Venue, request.Account,
                 request.Market, request.Operation, null, now, request.DeadlineAt,
-                null, null, null, RecoveryOperationStage.Prepared, null);
+                null, null, null, RecoveryOperationStage.Prepared, null, request.ActionKind);
             return SaveState(_state with { Operations = [.. _state.Operations, operation] });
         }
         finally
@@ -453,7 +577,8 @@ internal sealed class RecoveryCoordinator
                 return false;
             var operation = _state.Operations.SingleOrDefault(candidate => candidate.OperationId == operationId);
             if (operation is not { Stage: RecoveryOperationStage.Prepared }
-                || !IsEntryAllowed(operation.Venue, savedOperatingIntent))
+                || !IsActionAllowed(operation.Venue, operation.Account, savedOperatingIntent,
+                    operation.ActionKind, operation.Market, operationId))
                 return false;
 
             var now = _clock.UtcNow;
@@ -482,17 +607,69 @@ internal sealed class RecoveryCoordinator
         }
     }
 
-    internal async Task<bool> CompleteTransferAsync(
+    internal async Task<bool> AbandonPreparedOperationAsync(
         string operationId,
-        RecoveryTransferOutcome outcome,
-        AppSettings settings,
-        string? detail = null,
         CancellationToken cancellationToken = default)
     {
         await _stateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (!Enum.IsDefined(outcome))
+            if (!_storageReady)
+                return false;
+            var operation = _state.Operations.SingleOrDefault(candidate => candidate.OperationId == operationId);
+            if (operation is not { Stage: RecoveryOperationStage.Prepared })
+                return false;
+            return SaveState(ReplaceOperation(_state, operation with
+            {
+                Stage = RecoveryOperationStage.Abandoned,
+                CompletedAt = _clock.UtcNow,
+                Outcome = "Подготовлено, но адаптер не вызывался."
+            }));
+        }
+        finally
+        {
+            _stateGate.Release();
+        }
+    }
+
+    internal async Task<bool> AbortTransferBeforeCallbackAsync(
+        string operationId,
+        CancellationToken cancellationToken = default)
+    {
+        await _stateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (!_storageReady)
+                return false;
+            var operation = _state.Operations.SingleOrDefault(candidate => candidate.OperationId == operationId);
+            if (operation is not { Stage: RecoveryOperationStage.TransferStarted })
+                return false;
+            return SaveState(ReplaceOperation(_state, operation with
+            {
+                Stage = RecoveryOperationStage.Abandoned,
+                CompletedAt = _clock.UtcNow,
+                Outcome = "Участок передачи сохранён, но адаптер не вызывался."
+            }));
+        }
+        finally
+        {
+            _stateGate.Release();
+        }
+    }
+
+    internal async Task<bool> CompleteTransferAsync(
+        string operationId,
+        RecoveryTransferOutcome outcome,
+        AppSettings settings,
+        string? detail = null,
+        CancellationToken cancellationToken = default,
+        RecoveryRetryability retryability = RecoveryRetryability.Unknown)
+    {
+        await _stateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (!Enum.IsDefined(outcome) || !Enum.IsDefined(retryability)
+                || outcome != RecoveryTransferOutcome.NotExecuted && retryability != RecoveryRetryability.Unknown)
                 return false;
             if (!_storageReady)
                 return false;
@@ -509,7 +686,8 @@ internal sealed class RecoveryCoordinator
                         ? RecoveryOperationStage.Confirmed
                         : RecoveryOperationStage.NotExecuted,
                     CompletedAt = now,
-                    Outcome = detail ?? outcome.ToString()
+                    Outcome = detail ?? outcome.ToString(),
+                    Retryability = retryability
                 };
                 return SaveState(ReplaceOperation(_state, completed));
             }
@@ -841,12 +1019,13 @@ internal sealed class RecoveryCoordinator
             if (operation.Stage is not (RecoveryOperationStage.TransferStarted or RecoveryOperationStage.Unknown))
                 return operation;
 
-            var outcome = read.OperationOutcomes![operation.OperationId].Outcome;
+            var observation = read.OperationOutcomes![operation.OperationId];
             return operation with
             {
                 Stage = RecoveryOperationStage.Reconciled,
                 ReconciledAt = now,
-                Outcome = outcome.ToString()
+                Outcome = observation.Outcome.ToString(),
+                Retryability = observation.Retryability
             };
         }).ToList();
 
@@ -968,6 +1147,8 @@ internal sealed class RecoveryCoordinator
             if (!unresolved.TryGetValue(operation.OperationId, out var observation)
                 || observation is null
                 || !Enum.IsDefined(observation.Outcome)
+                || !Enum.IsDefined(observation.Retryability)
+                || !Enum.IsDefined(observation.EntryOrderState)
                 || observation.Outcome == RecoveryOperationOutcome.Unknown
                 || observation.OperationId != operation.OperationId
                 || observation.Venue != operation.Venue
@@ -1030,7 +1211,8 @@ internal sealed class RecoveryCoordinator
         && request.Venue != UnknownVenue
         && !string.IsNullOrWhiteSpace(request.Account)
         && !string.IsNullOrWhiteSpace(request.Market)
-        && !string.IsNullOrWhiteSpace(request.Operation);
+        && !string.IsNullOrWhiteSpace(request.Operation)
+        && Enum.IsDefined(request.ActionKind);
 
     private static bool ValidRetrySettings(AppSettings settings) => settings.ReadRetryCount >= 0
         && settings.ReadRetryDelaySeconds > 0
