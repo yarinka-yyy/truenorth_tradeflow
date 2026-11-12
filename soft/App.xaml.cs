@@ -5,6 +5,7 @@ using System.Windows;
 using System.Windows.Threading;
 using TrueNorth.TradeFlow.Notifications;
 using TrueNorth.TradeFlow.Recovery;
+using TrueNorth.TradeFlow.Trading;
 using Forms = System.Windows.Forms;
 
 namespace TrueNorth.TradeFlow;
@@ -36,6 +37,8 @@ public partial class App : System.Windows.Application
     private NotificationDispatcher? _notificationDispatcher;
     private TelegramCredentialStore? _telegramCredentialStore;
     private MainWindow? _mainWindow;
+    private LocalTradingScenario? _localTradingScenario;
+    private string? _localScenarioUnavailableReason;
     private bool _ownsMutex;
     private bool _isClosing;
     private bool _exitConfirmationOpen;
@@ -233,15 +236,22 @@ public partial class App : System.Windows.Application
         _notificationDispatcher = new NotificationDispatcher(recoveryCoordinator,
             [new WindowsNotificationChannel(_trayIcon!, Dispatcher),
              new TelegramNotificationChannel(_telegramCredentialStore)], notificationSettings);
+        _localTradingScenario = LocalTradingScenario.TryCreate(
+            LocalTradingScenario.DefaultDirectory(recoveryScope.ProfileRoot), settings.Profile,
+            out _localScenarioUnavailableReason);
         _mainWindow = new MainWindow(settingsStore, settings, _wakeProtection, _sessionService,
             recoveryCoordinator: _recoveryCoordinator,
             notificationDispatcher: _notificationDispatcher,
             telegramCredentialStore: _telegramCredentialStore,
-            processRecoveryStatus: _processRecoveryStatus);
+            processRecoveryStatus: _processRecoveryStatus,
+            localTradingScenario: _localTradingScenario,
+            localScenarioUnavailableReason: _localScenarioUnavailableReason);
         MainWindow = _mainWindow;
         _mainWindow.ShowInTaskbar = false;
         _notificationDispatcher.Start();
         SessionEnding += HandleSessionEnding;
+        if (_localTradingScenario is not null)
+            _ = _localTradingScenario.ResumeAsync();
 
         if (!arguments.Contains("--startup", StringComparer.OrdinalIgnoreCase))
             ShowMainWindow();
@@ -286,7 +296,7 @@ public partial class App : System.Windows.Application
         _mainWindow.Activate();
     }
 
-    private void ConfirmExit()
+    private async void ConfirmExit()
     {
         if (_mainWindow is null || _isClosing || _exitConfirmationOpen)
             return;
@@ -294,10 +304,57 @@ public partial class App : System.Windows.Application
         _exitConfirmationOpen = true;
         try
         {
+            var preparingExit = _localTradingScenario?.HoldAndReconcileForExitAsync();
             ShowMainWindow();
-            var confirmation = new ExitConfirmationWindow { Owner = _mainWindow };
-            if (confirmation.ShowDialog() == true)
-                ShutdownCleanly();
+            var snapshot = preparingExit is null
+                ? new LocalScenarioExitSnapshot(false, [], "Локальная сверка выхода недоступна.", [])
+                : await preparingExit;
+            while (!_isClosing)
+            {
+                var confirmation = new ExitConfirmationWindow(snapshot) { Owner = _mainWindow };
+                var accepted = confirmation.ShowDialog() == true;
+                var action = accepted ? confirmation.Action : ExitConfirmationAction.Return;
+                if (action == ExitConfirmationAction.Return)
+                {
+                    if (_localTradingScenario is null)
+                        return;
+                    var resumed = await _localTradingScenario.ResumeAfterExitAsync();
+                    if (resumed.Succeeded)
+                        return;
+                    snapshot = await _localTradingScenario.HoldAndReconcileForExitAsync();
+                    snapshot = snapshot with { IsKnown = false, Status = resumed.Status };
+                    continue;
+                }
+                if (action == ExitConfirmationAction.CancelEntries)
+                {
+                    if (_localTradingScenario is null)
+                    {
+                        snapshot = snapshot with { IsKnown = false, Status = "Точные идентификаторы заявок недоступны." };
+                        continue;
+                    }
+                    var cancellation = await _localTradingScenario.CancelOpenEntriesForExitAsync(snapshot);
+                    snapshot = cancellation.Snapshot;
+                    if (snapshot.IsKnown && snapshot.OpenEntries.Count == 0)
+                    {
+                        ShutdownCleanly();
+                        return;
+                    }
+                    continue;
+                }
+                if (action == ExitConfirmationAction.Leave)
+                {
+                    ShutdownCleanly();
+                    return;
+                }
+            }
+        }
+        catch (Exception)
+        {
+            if (!_isClosing)
+            {
+                ShowMainWindow();
+                _ = _localTradingScenario?.ResumeAfterExitAsync();
+            }
         }
         finally
         {
@@ -333,6 +390,8 @@ public partial class App : System.Windows.Application
         _processRecoveryScope?.DisableRecovery();
         _recoveryStopEvent?.Set();
         _mainWindow?.PrepareForApplicationClose();
+        _localTradingScenario?.Dispose();
+        _localTradingScenario = null;
         _notificationDispatcher?.Dispose();
         _notificationDispatcher = null;
         _sessionService?.Close();

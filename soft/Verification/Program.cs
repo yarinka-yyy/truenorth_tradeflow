@@ -33,6 +33,16 @@ internal static class Program
             if (tradingLoopOnly)
             {
                 TradingLoopChecks.CheckCoreAsync(Check, fixtureRoot).GetAwaiter().GetResult();
+                var app = new App();
+                app.InitializeComponent();
+                try
+                {
+                    TradingLoopChecks.CheckMainWindow(Check, app, fixtureRoot, ArtifactsDirectory());
+                }
+                finally
+                {
+                    app.Shutdown();
+                }
                 Console.WriteLine($"PASS: {_checks} trading-loop assertions (--trading-loop)");
                 return 0;
             }
@@ -633,6 +643,7 @@ internal static class Program
             RecoveryChecks.CheckNativeWpf(Check, root);
             ProcessRecoveryChecks.CheckNativeWpf(Check, root);
             NotificationChecks.CheckNativeWpf(Check, root);
+            TradingLoopChecks.CheckMainWindow(Check, app, root, ArtifactsDirectory());
         }
         finally
         {
@@ -739,7 +750,7 @@ internal static class Program
         Dispatcher.PushFrame(frame);
     }
 
-    private static string ArtifactsDirectory()
+    internal static string ArtifactsDirectory()
     {
         var configuredPath = Environment.GetEnvironmentVariable("TRUENORTH_TRADEFLOW_VERIFY_ARTIFACTS");
         if (!string.IsNullOrWhiteSpace(configuredPath))

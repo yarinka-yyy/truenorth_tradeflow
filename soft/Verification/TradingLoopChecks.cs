@@ -1,6 +1,16 @@
 using System.Globalization;
 using System.IO;
 using System.Text.Json;
+using System.Collections.Concurrent;
+using System.Windows;
+using System.Windows.Automation;
+using System.Windows.Automation.Peers;
+using System.Windows.Automation.Provider;
+using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
+using System.Windows.Threading;
 using TrueNorth.TradeFlow;
 using TrueNorth.TradeFlow.Account;
 using TrueNorth.TradeFlow.Orders;
@@ -37,6 +47,759 @@ internal static class TradingLoopChecks
         await CheckLimitReassessmentOutcomes(check, Path.Combine(root, "trading-loop-limit-outcomes"));
         await CheckLimitReassessmentRaces(check, Path.Combine(root, "trading-loop-limit-races"));
         await CheckLimitReassessmentRecovery(check, Path.Combine(root, "trading-loop-limit-recovery"));
+        await CheckLocalScenarioJourney(check, Path.Combine(root, "trading-loop-local-journey"));
+        await CheckLocalScenarioStopAndTest(check, Path.Combine(root, "trading-loop-local-stop"));
+        await CheckLocalScenarioExit(check, Path.Combine(root, "trading-loop-local-exit"));
+        await CheckLocalScenarioDeadlineWake(check, Path.Combine(root, "trading-loop-local-deadline"));
+        await CheckLocalScenarioFallbackDeadline(check, Path.Combine(root, "trading-loop-local-fallback-deadline"));
+        await CheckLocalScenarioHeldDeadline(check, Path.Combine(root, "trading-loop-local-held-deadline"));
+        await CheckLocalScenarioLimitDeadline(check, Path.Combine(root, "trading-loop-local-limit-deadline"));
+    }
+
+    private static async Task CheckLocalScenarioJourney(Action<bool, string> check, string root)
+    {
+        var profile = LocalScenarioProfile("Market");
+        var clock = new FakeClock(InitialTime);
+        var scenario = new LocalTradingScenario(root, profile, clock, automaticScheduling: false);
+        check(scenario.IsReady && !scenario.HasExternalConnections
+              && scenario.SettingsPath.StartsWith(Path.Combine(root, "profile"), StringComparison.OrdinalIgnoreCase)
+              && scenario.JournalPath.StartsWith(Path.Combine(root, "journal"), StringComparison.OrdinalIgnoreCase),
+            "local scenario uses its own durable profile and journal with no external connections");
+        var start = await scenario.StartAsync(profile);
+        var first = await scenario.RunOnceAsync();
+        check(start.Succeeded && first.Succeeded && scenario.SyntheticAiRequestCount == 1
+              && scenario.SyntheticOpenOrders.Count == 0 && scenario.SyntheticPositions.Count == 1,
+            $"synthetic search creates one filled opening request and position (start={start.Status}; cycle={first.Status}; requests={scenario.SyntheticAiRequestCount}; orders={scenario.SyntheticOpenOrders.Count}; positions={scenario.SyntheticPositions.Count})");
+
+        var opened = scenario.ManagedOrders.FirstOrDefault(order => order.Status == ManagedOrderStatus.Protected);
+        check(opened is not null && opened.EntryTerminalState == ManagedEntryTerminalState.Filled
+              && opened.RemainingQuantity == 0m && opened.PositionQuantity > 0m,
+            "local entry is linked to the A/B lifecycle with a fully filled, protected owned position");
+        if (opened is null)
+        {
+            scenario.Dispose();
+            return;
+        }
+        var afterOpen = await scenario.Recovery.ReadCurrentSnapshotAsync(opened.Venue, opened.Account);
+        check(afterOpen.Account?.Protections.Value?.SingleOrDefault(item => item.PositionId == opened.PositionId) is
+                { Ownership: PositionOwnership.SoftwareOwned, TakeProfitCoveredQuantity: var tpCovered,
+                    StopLossCoveredQuantity: var slCovered }
+              && tpCovered == opened.PositionQuantity && slCovered == opened.PositionQuantity,
+            "synthetic TP and SL cover the exact owned position quantity");
+
+        check(await scenario.CloseAtTakeProfitAsync(opened.IntentId),
+            "the local fixture can deliver one durable synthetic take-profit close");
+        clock.UtcNow = opened.NextManagementCheckAt
+            ?? throw new InvalidOperationException("Synthetic position has no scheduled management check.");
+        var next = await scenario.RunOnceAsync();
+        var closed = scenario.ManagedOrders.SingleOrDefault(order => order.IntentId == opened.IntentId);
+        check(next.Succeeded && closed?.Status == ManagedOrderStatus.Closed
+              && scenario.SyntheticAiRequestCount == 2 && scenario.SyntheticPositions.Count == 1
+              && scenario.ManagedOrders.Any(order => order.IntentId != opened.IntentId
+                  && order.Status == ManagedOrderStatus.Protected),
+            $"a verified TP close leads to the next synthetic search and protected entry (status={next.Status}; requests={scenario.SyntheticAiRequestCount}; positions={scenario.SyntheticPositions.Count})");
+
+        var savedIntent = scenario.ManagedOrders.FirstOrDefault(order => order.IntentId != opened.IntentId)?.IntentId;
+        scenario.Dispose();
+        using var restarted = new LocalTradingScenario(root, profile, clock, automaticScheduling: false);
+        var recovered = await restarted.ResumeAsync();
+        check(recovered.Succeeded && restarted.HasSavedStart && restarted.SyntheticPositions.Count == 1
+              && restarted.SyntheticOpenOrders.Count == 0
+              && savedIntent is not null && restarted.ManagedOrders.Any(order => order.IntentId == savedIntent),
+            "restart reconciles the durable local venue state before resuming without duplicating an entry");
+    }
+
+    private static async Task CheckLocalScenarioStopAndTest(Action<bool, string> check, string root)
+    {
+        var profile = LocalScenarioProfile("Limit");
+        using var scenario = new LocalTradingScenario(root, profile,
+            new FakeClock(InitialTime), automaticScheduling: false);
+        check((await scenario.StartAsync(profile)).Succeeded, "local Stop fixture starts from a saved, complete profile");
+        await scenario.RunOnceAsync();
+        var testProfile = profile.Copy();
+        testProfile.SelectedMode = "Test";
+        testProfile.SavedOperatingIntent = true;
+        var stopped = await scenario.UpdateProfileAsync(testProfile);
+        var state = scenario.Snapshot();
+        check(!scenario.Loop.IsAdmitting && scenario.Loop.Profile.SelectedMode == "Test"
+              && !scenario.Loop.Profile.SavedOperatingIntent && scenario.SyntheticOpenOrders.Count == 0
+              && scenario.SyntheticPositions.Count == 1 && state.HasOwnedMonitoring
+              && state.OwnedPositionCount == 1 && state.OwnedOpenEntryCount == 0,
+            $"Test saves mode and Stop together, cancels only the exact remainder, and keeps the protected position under monitoring (result={stopped.Status})");
+    }
+
+    private static async Task CheckLocalScenarioExit(Action<bool, string> check, string root)
+    {
+        var profile = LocalScenarioProfile("Limit");
+        var clock = new FakeClock(InitialTime);
+        using (var confirmed = new LocalTradingScenario(Path.Combine(root, "confirmed"), profile, clock,
+                   automaticScheduling: false))
+        {
+            await confirmed.StartAsync(profile);
+            await confirmed.RunOnceAsync();
+            var before = await confirmed.HoldAndReconcileForExitAsync();
+            check(before.IsKnown && before.OpenEntries.Count == 1 && confirmed.Loop.IsExitHeld
+                  && !confirmed.Loop.IsAdmitting,
+                "tray exit holds admission before counting exactly owned local opening entries");
+            confirmed.FillDuringNextCancel(1m);
+            var cancelled = await confirmed.CancelOpenEntriesForExitAsync(before);
+            check(cancelled.Snapshot.IsKnown && cancelled.Snapshot.OpenEntries.Count == 0
+                  && cancelled.Results.Count == 1
+                  && cancelled.Results[0].Contains(before.OpenEntries[0].OrderId, StringComparison.Ordinal)
+                  && confirmed.SyntheticOpenOrders.Count == 0
+                  && confirmed.SyntheticPositions.Count == 1,
+                "exit cancellation follows the exact owned ID, reconciles its fill race, and leaves the position open");
+            var resumed = await confirmed.ResumeAfterExitAsync();
+            check(resumed.Succeeded && !confirmed.Loop.IsExitHeld && confirmed.Loop.IsAdmitting
+                  && confirmed.SyntheticPositions.Count == 1,
+                "Return reconciles first and then restores the saved Start intent");
+        }
+
+        var cancelAndLeaveRoot = Path.Combine(root, "cancel-and-leave");
+        using (var cancelAndLeave = new LocalTradingScenario(cancelAndLeaveRoot, profile, clock,
+                   automaticScheduling: false))
+        {
+            await cancelAndLeave.StartAsync(profile);
+            await cancelAndLeave.RunOnceAsync();
+            var before = await cancelAndLeave.HoldAndReconcileForExitAsync();
+            var cancelled = await cancelAndLeave.CancelOpenEntriesForExitAsync(before);
+            check(cancelled.Snapshot.IsKnown && cancelled.Snapshot.OpenEntries.Count == 0
+                  && cancelled.Results.Count == 1 && cancelAndLeave.SyntheticPositions.Count == 1,
+                "confirmed Cancel then Leave records its exact cancellation and preserves the open position");
+        }
+        using (var restartedAfterCancel = new LocalTradingScenario(cancelAndLeaveRoot, profile, clock,
+                   automaticScheduling: false))
+        {
+            await restartedAfterCancel.ResumeAsync();
+            check(restartedAfterCancel.HasSavedStart && restartedAfterCancel.SyntheticOpenOrders.Count == 0
+                  && restartedAfterCancel.SyntheticPositions.Count == 1,
+                "restart after Cancel and Leave reconciles the position without recreating the cancelled remainder");
+        }
+
+        var unknownRoot = Path.Combine(root, "unknown");
+        using (var unknown = new LocalTradingScenario(unknownRoot, profile, clock, automaticScheduling: false))
+        {
+            await unknown.StartAsync(profile);
+            await unknown.RunOnceAsync();
+            var before = await unknown.HoldAndReconcileForExitAsync();
+            unknown.SetNextCancelOutcome(RecoveryOperationOutcome.Unknown);
+            var result = await unknown.CancelOpenEntriesForExitAsync(before);
+            check(!result.Snapshot.IsKnown && result.Results.Count == 1
+                  && result.Snapshot.CancellationResults.Count == 1
+                  && unknown.SyntheticOpenOrders.Count == 1 && unknown.SyntheticPositions.Count == 1
+                  && unknown.Loop.Profile.SavedOperatingIntent,
+                "unknown cancellation remains visible before Leave or Return and preserves the persisted order and intent");
+        }
+        using var restarted = new LocalTradingScenario(unknownRoot, profile, clock, automaticScheduling: false);
+        var recovery = await restarted.ResumeAsync();
+        check(restarted.SyntheticOpenOrders.Count == 1 && restarted.SyntheticPositions.Count == 1
+              && restarted.Loop.Profile.SavedOperatingIntent && restarted.SyntheticAiRequestCount == 0
+              && !recovery.Succeeded,
+            "restart after an unknown exit cancellation reconciles the same local order and never resends entry");
+    }
+
+    private static async Task CheckLocalScenarioDeadlineWake(Action<bool, string> check, string root)
+    {
+        var profile = LocalScenarioProfile("Market");
+        profile.Settings.RecoveryCheckSeconds = 3600;
+        var clock = new FakeClock(InitialTime);
+        var delays = new ControlledDelayQueue();
+        using var scenario = new LocalTradingScenario(root, profile, clock, delays.DelayAsync);
+        scenario.ReturnNoSetupForNextSearch();
+        await scenario.StartAsync(profile);
+        await WaitUntilAsync(() => scenario.SyntheticAiRequestCount == 1, "first deadline fixture search");
+        await WaitUntilAsync(() => scenario.Loop.State.NextSearchAt.ContainsKey("SOL"),
+            "persisted NO_SETUP deadline");
+        var retryAt = scenario.Loop.State.NextSearchAt["SOL"];
+        await WaitUntilAsync(() => delays.PendingCount > 0, "local scheduler wait registration");
+        scenario.ReturnNoSetupForNextSearch();
+        clock.UtcNow = retryAt;
+        delays.ReleaseNext();
+        await WaitUntilAsync(() => scenario.SyntheticAiRequestCount == 2, "persisted search deadline wake");
+        check(retryAt == InitialTime.AddMinutes(profile.Settings.NewSetupRetryMinutes)
+              && scenario.Loop.State.NextSearchAt["SOL"] > retryAt,
+            "local scheduler sleeps on the saved deadline and wakes after controlled-clock advancement");
+    }
+
+    private static async Task CheckLocalScenarioFallbackDeadline(Action<bool, string> check, string root)
+    {
+        var profile = LocalScenarioProfile("Market");
+        profile.Settings.RecoveryCheckSeconds = 60;
+        profile.SavedOperatingIntent = true;
+        var settingsStore = new SettingsStore(Path.Combine(root, "profile", "settings.json"));
+        var saved = settingsStore.Save(profile);
+        check(saved.Succeeded, "fallback scheduler fixture begins from a durably saved Start intent");
+        if (!saved.Succeeded)
+            return;
+
+        var clock = new FakeClock(InitialTime);
+        var delays = new ControlledDelayQueue();
+        using var scenario = new LocalTradingScenario(root, profile, clock, delays.DelayAsync);
+        await WaitUntilAsync(() => delays.PendingCount > 0, "initial fallback deadline wait");
+        var firstFallbackAt = InitialTime.AddSeconds(profile.Settings.RecoveryCheckSeconds);
+        check(scenario.ScheduledRunCount == 0 && scenario.Loop.State.NextSearchAt.Count == 0
+              && scenario.Loop.State.LimitReassessments.Count == 0
+              && delays.Durations.First() == TimeSpan.FromSeconds(profile.Settings.RecoveryCheckSeconds),
+            "saved Start with no persisted search or Limit deadline waits on one recovery fallback without an external wake");
+
+        delays.ReleaseNext();
+        await WaitUntilAsync(() => delays.PendingCount > 0, "fallback rearmed while the fake clock remains early");
+        check(scenario.ScheduledRunCount == 0 && delays.Durations.Last()
+              == TimeSpan.FromSeconds(profile.Settings.RecoveryCheckSeconds),
+            "an elapsed test delay cannot run a fallback before the injected clock reaches its fixed deadline");
+
+        clock.UtcNow = firstFallbackAt;
+        delays.ReleaseNext();
+        await WaitUntilAsync(() => scenario.ScheduledRunCount == 1 && delays.PendingCount > 0,
+            "first fallback tick and next retry wait");
+        check(scenario.SyntheticAiRequestCount == 1 && scenario.SyntheticPositions.Count == 1
+              && delays.Durations.Last() == TimeSpan.FromSeconds(profile.Settings.RecoveryCheckSeconds),
+            "the fallback runs once at its fixed deadline and advances the next recovery retry by one interval");
+
+        clock.UtcNow = firstFallbackAt.AddSeconds(profile.Settings.RecoveryCheckSeconds);
+        delays.ReleaseNext();
+        await WaitUntilAsync(() => scenario.ScheduledRunCount == 2 && delays.PendingCount > 0,
+            "second fallback tick without a manual signal");
+        check(scenario.ScheduledRunCount == 2 && scenario.SyntheticPositions.Count == 1,
+            "the next fallback is consumed on schedule without spinning or duplicating the synthetic position");
+    }
+
+    private static async Task CheckLocalScenarioHeldDeadline(Action<bool, string> check, string root)
+    {
+        var profile = LocalScenarioProfile("Market");
+        profile.Settings.RecoveryCheckSeconds = 3600;
+        var clock = new FakeClock(InitialTime);
+        var delays = new ControlledDelayQueue();
+        using var scenario = new LocalTradingScenario(root, profile, clock, delays.DelayAsync);
+        scenario.ReturnNoSetupForNextSearch();
+        await scenario.StartAsync(profile);
+        await WaitUntilAsync(() => scenario.SyntheticAiRequestCount == 1, "held-deadline fixture first search");
+        await WaitUntilAsync(() => scenario.Loop.State.NextSearchAt.ContainsKey("SOL"),
+            "held-deadline fixture saved search deadline");
+        var retryAt = scenario.Loop.State.NextSearchAt["SOL"];
+        await WaitUntilAsync(() => delays.PendingCount > 0, "held-deadline initial scheduler wait");
+
+        var held = await scenario.HoldAndReconcileForExitAsync();
+        var runsWhileHeld = scenario.ScheduledRunCount;
+        clock.UtcNow = retryAt;
+        await Task.Delay(40).ConfigureAwait(false);
+        check(held.IsKnown && scenario.Loop.IsExitHeld
+              && scenario.SyntheticAiRequestCount == 1
+              && scenario.ScheduledRunCount == runsWhileHeld,
+            "a due search deadline is ignored during exit hold without a scheduler spin");
+
+        var resumed = await scenario.ResumeAfterExitAsync();
+        await WaitUntilAsync(() => scenario.SyntheticAiRequestCount == 2,
+            "held search deadline wakes after Return");
+        check(resumed.Succeeded && !scenario.Loop.IsExitHeld
+              && scenario.ScheduledRunCount > runsWhileHeld
+              && scenario.SyntheticAiRequestCount == 2,
+            "Return wakes the same scheduler and consumes the due search after reconciliation");
+    }
+
+    private static async Task CheckLocalScenarioLimitDeadline(Action<bool, string> check, string root)
+    {
+        var profile = LocalScenarioProfile("Limit");
+        profile.Settings.LimitReassessmentMinutes = 30;
+        profile.Settings.LimitOrderCheckMinutes = 240;
+        profile.Settings.PositionCheckMinutes = 240;
+        profile.Settings.PartialFillCancelMinutes = 240;
+        profile.Settings.RecoveryCheckSeconds = 7200;
+        var clock = new FakeClock(InitialTime);
+        var delays = new ControlledDelayQueue();
+        using var scenario = new LocalTradingScenario(root, profile, clock, delays.DelayAsync);
+        await scenario.StartAsync(profile);
+        await WaitUntilAsync(() => scenario.SyntheticOpenOrders.Count == 1
+            && scenario.Loop.State.LimitReassessments.Count == 1, "scheduled Limit fixture entry");
+        var reassessment = scenario.Loop.State.LimitReassessments.Values.Single();
+        await WaitUntilAsync(() => delays.PendingCount > 0, "Limit scheduler deadline wait");
+        var firstDelay = delays.Durations.First();
+        check(firstDelay == reassessment.NextReassessmentAt - clock.UtcNow,
+            $"scheduler uses the persisted Limit reassessment deadline (delay={firstDelay}; due={reassessment.NextReassessmentAt:O})");
+
+        clock.UtcNow = reassessment.NextReassessmentAt;
+        delays.ReleaseNext();
+        await WaitUntilAsync(() => scenario.Loop.State.LimitReassessments.Values.Single().NextReassessmentAt
+            > reassessment.NextReassessmentAt, "due Limit reassessment is consumed");
+        check(scenario.ScheduledRunCount >= 2,
+            "the saved Limit deadline wakes the scheduler and is rescheduled after one bounded cycle");
+    }
+
+    private static SettingsProfile LocalScenarioProfile(string entryType) => new()
+    {
+        SelectedMode = "TrueNorth AI setups",
+        Settings = new AppSettings
+        {
+            Assets = ["SOL"],
+            EntryType = entryType,
+            MarginBalancePercent = 10m,
+            Leverage = 1m,
+            PositionCheckMinutes = 5,
+            LimitOrderCheckMinutes = 1,
+            PartialFillCancelMinutes = 60,
+            NewSetupRetryMinutes = 240,
+            LimitReassessmentMinutes = 60,
+            RecoveryCheckSeconds = 60,
+            NotificationsEnabled = true,
+            OpeningNotifications = true,
+            ClosingNotifications = true,
+            OrderChangeNotifications = true,
+            ErrorNotifications = true,
+            RecoveryNotifications = true,
+            PreventSleep = true
+        }
+    };
+
+    private static async Task WaitUntilAsync(Func<bool> condition, string description)
+    {
+        for (var attempt = 0; attempt < 400; attempt++)
+        {
+            if (condition())
+                return;
+            await Task.Delay(5).ConfigureAwait(false);
+        }
+        throw new InvalidOperationException("Timed out waiting for " + description + ".");
+    }
+
+    private sealed class ControlledDelayQueue
+    {
+        private readonly ConcurrentQueue<TaskCompletionSource> _waiting = new();
+        private readonly ConcurrentQueue<TimeSpan> _durations = new();
+
+        internal int PendingCount => _waiting.Count(item => !item.Task.IsCompleted);
+        internal IReadOnlyList<TimeSpan> Durations => _durations.ToArray();
+
+        internal Task DelayAsync(TimeSpan delay, CancellationToken cancellationToken)
+        {
+            _durations.Enqueue(delay);
+            var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            cancellationToken.Register(() => completion.TrySetCanceled(cancellationToken));
+            _waiting.Enqueue(completion);
+            return completion.Task;
+        }
+
+        internal void ReleaseNext()
+        {
+            while (_waiting.TryDequeue(out var completion))
+                if (!completion.Task.IsCompleted)
+                {
+                    completion.TrySetResult();
+                    return;
+                }
+            throw new InvalidOperationException("No controlled scheduler delay is pending.");
+        }
+    }
+
+    internal static void CheckMainWindow(
+        Action<bool, string> check,
+        Application application,
+        string fixtureRoot,
+        string artifactDirectory)
+    {
+        CheckLocalScenarioWindow(check, application, fixtureRoot, artifactDirectory);
+        CheckLocalScenarioModeSaveFailures(check, application, fixtureRoot);
+        CheckExitConfirmationWindows(check, application);
+    }
+
+    private static void CheckLocalScenarioModeSaveFailures(
+        Action<bool, string> check,
+        Application application,
+        string fixtureRoot)
+    {
+        var profile = LocalScenarioProfile("Limit");
+        var ordinaryPath = Path.Combine(fixtureRoot, "local-mode-ordinary-failure", "settings.json");
+        var ordinaryBase = new SettingsStore(ordinaryPath);
+        check(ordinaryBase.Save(profile).Succeeded, "ordinary mode-write failure fixture is prepared");
+        var ordinaryBytes = File.ReadAllBytes(ordinaryPath);
+        var ordinaryStore = new SettingsStore(ordinaryPath,
+            commitOverride: (_, _, _) => throw new IOException("fixed ordinary profile write failure"));
+        using (var local = new LocalTradingScenario(Path.Combine(fixtureRoot, "local-mode-ordinary-failure", "local"),
+                   profile, new FakeClock(InitialTime), automaticScheduling: false))
+        {
+            check(local.StartAsync(profile).GetAwaiter().GetResult().Succeeded,
+                "local mode-write failure fixture starts from its saved local profile");
+            using var wake = new WakeProtectionController(false, _ => true);
+            var window = new MainWindow(ordinaryStore, ordinaryStore.Load(), wake,
+                new TrueNorthSessionChecks.RecordingSessionService(), new SyntheticAiAnalysisSource(),
+                new AiTestReportStore(Path.Combine(fixtureRoot, "local-mode-ordinary-failure", "reports")),
+                localTradingScenario: local);
+            try
+            {
+                window.Show();
+                SelectMode(application, window, 0);
+                PumpUntil(() => local.Loop.Profile.SelectedMode == "Test"
+                    && Get<TextBlock>(window, "OverviewModeStatusText").Visibility == Visibility.Visible,
+                    application, "ordinary profile mode-save failure");
+                check(File.ReadAllBytes(ordinaryPath).SequenceEqual(ordinaryBytes)
+                      && ordinaryStore.Load().Profile.SelectedMode == "TrueNorth AI setups"
+                      && !local.Loop.Profile.SavedOperatingIntent && !local.Loop.IsAdmitting
+                      && !Get<Button>(window, "LocalScenarioStartButton").IsEnabled
+                      && local.Snapshot().HasOwnedMonitoring == false,
+                    "ordinary mode-save failure leaves its bytes unchanged and the locally saved Test+Stop profile cannot admit entries");
+            }
+            finally
+            {
+                window.AllowApplicationClose();
+                window.Close();
+            }
+        }
+
+        var localFailureRoot = Path.Combine(fixtureRoot, "local-mode-local-failure");
+        var localOrdinaryPath = Path.Combine(localFailureRoot, "app-settings.json");
+        var localOrdinaryStore = new SettingsStore(localOrdinaryPath);
+        check(localOrdinaryStore.Save(profile).Succeeded, "local mode-write failure app profile is prepared");
+        var localOrdinaryBytes = File.ReadAllBytes(localOrdinaryPath);
+        var allowLocalWrites = true;
+        using (var local = new LocalTradingScenario(Path.Combine(localFailureRoot, "local"), profile,
+                   new FakeClock(InitialTime), automaticScheduling: false,
+                   profileCommitOverride: (temporary, target, _) =>
+                   {
+                       if (!allowLocalWrites)
+                           throw new IOException("fixed local profile write failure");
+                       File.Move(temporary, target, overwrite: true);
+                   }))
+        {
+            check(local.StartAsync(profile).GetAwaiter().GetResult().Succeeded,
+                "local store failure fixture starts from its saved local profile");
+            allowLocalWrites = false;
+            using var wake = new WakeProtectionController(false, _ => true);
+            var window = new MainWindow(localOrdinaryStore, localOrdinaryStore.Load(), wake,
+                new TrueNorthSessionChecks.RecordingSessionService(), new SyntheticAiAnalysisSource(),
+                new AiTestReportStore(Path.Combine(localFailureRoot, "reports")), localTradingScenario: local);
+            try
+            {
+                window.Show();
+                SelectMode(application, window, 0);
+                PumpUntil(() => local.Loop.Profile.SelectedMode == "Test"
+                    && Get<TextBlock>(window, "OverviewModeStatusText").Visibility == Visibility.Visible,
+                    application, "local profile mode-save failure");
+                check(File.ReadAllBytes(localOrdinaryPath).SequenceEqual(localOrdinaryBytes)
+                      && localOrdinaryStore.Load().Profile.SelectedMode == "TrueNorth AI setups"
+                      && !local.Loop.Profile.SavedOperatingIntent && !local.Loop.IsAdmitting
+                      && !Get<Button>(window, "LocalScenarioStartButton").IsEnabled,
+                    "local mode-save failure prevents the ordinary profile update and keeps current admission closed");
+                allowLocalWrites = true;
+                local.StopAsync().GetAwaiter().GetResult();
+            }
+            finally
+            {
+                window.AllowApplicationClose();
+                window.Close();
+            }
+        }
+    }
+
+    private static void CheckLocalScenarioWindow(
+        Action<bool, string> check,
+        Application application,
+        string fixtureRoot,
+        string artifactDirectory)
+    {
+        var root = Path.Combine(fixtureRoot, "trading-loop-local-window");
+        var profile = LocalScenarioProfile("Limit");
+        profile.Settings.PreventSleep = true;
+        var settingsStore = new SettingsStore(Path.Combine(root, "app-settings.json"));
+        check(settingsStore.Save(profile).Succeeded, "WPF local-loop fixture saves a complete application profile");
+        var ordinaryProfileBytes = File.ReadAllBytes(settingsStore.PathName);
+        var restartRoot = Path.Combine(root, "local-restart-intent");
+        using (var beforeRestart = new LocalTradingScenario(restartRoot, profile,
+                   new FakeClock(InitialTime), automaticScheduling: false))
+            check(beforeRestart.StartAsync(profile).GetAwaiter().GetResult().Succeeded,
+                "WPF fixture writes Start intent to the dedicated local profile");
+        using (var afterRestart = new LocalTradingScenario(restartRoot, profile,
+                   new FakeClock(InitialTime), automaticScheduling: false))
+            check(afterRestart.HasSavedStart
+                  && afterRestart.SettingsPath.StartsWith(Path.Combine(restartRoot, "profile"), StringComparison.OrdinalIgnoreCase),
+                "local restart restores saved intent from its dedicated profile");
+        var clock = new FakeClock(InitialTime);
+        var localScenario = new LocalTradingScenario(Path.Combine(root, "local-scenario"), profile,
+            clock, automaticScheduling: false);
+        var powerRequests = new List<bool>();
+        using var wakeProtection = new WakeProtectionController(true, active =>
+        {
+            powerRequests.Add(active);
+            return true;
+        });
+        var session = new TrueNorthSessionChecks.RecordingSessionService();
+        var reportRoot = Path.Combine(root, "ai-test-reports");
+        var window = new MainWindow(settingsStore, settingsStore.Load(), wakeProtection, session,
+            new SyntheticAiAnalysisSource(), new AiTestReportStore(reportRoot),
+            localTradingScenario: localScenario)
+        {
+            Width = 760,
+            Height = 560
+        };
+        try
+        {
+            window.Show();
+            window.UpdateLayout();
+            PumpDispatcher(application.Dispatcher);
+            check(!wakeProtection.IsRequestHeld && powerRequests.Count == 0
+                  && localScenario.LocalNotifications.Count == 0,
+                "idle local scenario sends no wake request or notification");
+            var realStart = Get<Button>(window, "RealStartButton");
+            var localStart = Get<Button>(window, "LocalScenarioStartButton");
+            var stop = Get<Button>(window, "LocalScenarioStopButton");
+            var closePosition = Get<Button>(window, "LocalScenarioClosePositionButton");
+            var scroll = Get<ScrollViewer>(window, "MainScrollViewer");
+            var signIn = Get<Button>(window, "OpenTrueNorthButton");
+            var checkSession = Get<Button>(window, "CheckTrueNorthSessionButton");
+            check(Get<TextBlock>(window, "LocalScenarioPauseText").Text.Contains("намерение Stop", StringComparison.Ordinal)
+                  && Get<TextBlock>(window, "LocalScenarioPauseText").Text.Contains("нет", StringComparison.OrdinalIgnoreCase)
+                  && Get<TextBlock>(window, "LocalScenarioActivityText").Text.Contains("остановлен", StringComparison.Ordinal)
+                  && Get<TextBlock>(window, "OperatingStatusText").Text.Contains("ОСТАНОВЛЕН", StringComparison.Ordinal)
+                  && Get<TextBlock>(window, "CurrentModeText").Text == "TrueNorth AI setups"
+                  && localScenario.SettingsPath.StartsWith(Path.Combine(localScenario.RootPath, "profile"), StringComparison.OrdinalIgnoreCase),
+                "overview separates the selected mode from the labelled, isolated local scenario");
+            var review = Get<Expander>(window, "LocalScenarioProfileReview");
+            check(AutomationProperties.GetName(review).Length > 0
+                  && Get<TextBlock>(window, "LocalScenarioProfileReviewText").Text.Contains("SOL", StringComparison.Ordinal)
+                  && Get<TextBlock>(window, "LocalScenarioProfileReviewText").Text.Contains("Limit", StringComparison.Ordinal)
+                  && Get<TextBlock>(window, "LocalScenarioProfileReviewText").Text.Contains("10%", StringComparison.Ordinal)
+                  && Get<TextBlock>(window, "LocalScenarioProfileReviewText").Text.Contains("×1", StringComparison.Ordinal),
+                "accessible profile review shows saved mode, assets, entry type, size and leverage before local Start");
+            check(realStart.IsTabStop && localStart.IsTabStop && stop.IsTabStop
+                  && AutomationProperties.GetName(realStart).Length > 0
+                  && AutomationProperties.GetName(localStart).Length > 0
+                  && localStart.IsEnabled && !stop.IsEnabled,
+                "local controls have keyboard stops and accessible names, with Start enabled from saved settings");
+            Keyboard.Focus(realStart);
+            realStart.MoveFocus(new TraversalRequest(FocusNavigationDirection.Next));
+            PumpDispatcher(application.Dispatcher);
+            check(Keyboard.FocusedElement == localStart,
+                "keyboard focus moves from the unavailable real Start to the explicit local Start");
+            var localStartBounds = localStart.TransformToAncestor(scroll)
+                .TransformBounds(new Rect(0, 0, localStart.ActualWidth, localStart.ActualHeight));
+            check(localStart.IsVisible && localStartBounds.Top >= 0 && localStartBounds.Bottom <= scroll.ViewportHeight,
+                "local Start remains readable in the 760x560 overview without scrolling");
+            var signInBounds = signIn.TransformToAncestor(scroll)
+                .TransformBounds(new Rect(0, 0, signIn.ActualWidth, signIn.ActualHeight));
+            var sessionCheckBounds = checkSession.TransformToAncestor(scroll)
+                .TransformBounds(new Rect(0, 0, checkSession.ActualWidth, checkSession.ActualHeight));
+            check(signIn.IsVisible && checkSession.IsVisible
+                  && signInBounds.Top >= 0 && signInBounds.Bottom <= scroll.ViewportHeight
+                  && sessionCheckBounds.Top >= 0 && sessionCheckBounds.Bottom <= scroll.ViewportHeight,
+                "existing sign-in and session controls remain visible with local Start at 760x560");
+            review.IsExpanded = true;
+            window.UpdateLayout();
+            PumpDispatcher(application.Dispatcher);
+            localStartBounds = localStart.TransformToAncestor(scroll)
+                .TransformBounds(new Rect(0, 0, localStart.ActualWidth, localStart.ActualHeight));
+            check(localStart.IsVisible && localStartBounds.Top >= 0 && localStartBounds.Bottom <= scroll.ViewportHeight,
+                "expanding the saved profile review keeps local Start readable at 760x560");
+            RenderWindow(window, Path.Combine(artifactDirectory, "block-c-local-loop-review-760x560.png"));
+            review.IsExpanded = false;
+            window.UpdateLayout();
+            RenderWindow(window, Path.Combine(artifactDirectory, "block-c-local-loop-760x560.png"));
+
+            InvokeAutomation(realStart);
+            PumpDispatcher(application.Dispatcher);
+            check(Get<TextBlock>(window, "LocalScenarioActionStatusText").Text.Contains("недоступен", StringComparison.Ordinal)
+                  && localScenario.SyntheticAiRequestCount == 0 && !localScenario.HasSavedStart,
+                $"real Start explains that live sources are unavailable and never reaches an adapter (status={Get<TextBlock>(window, "LocalScenarioActionStatusText").Text}; ai={localScenario.SyntheticAiRequestCount}; saved={localScenario.HasSavedStart})");
+            InvokeAutomation(localStart);
+            PumpUntil(() => localScenario.HasSavedStart, application,
+                "saved local Start intent");
+            check(File.ReadAllBytes(settingsStore.PathName).SequenceEqual(ordinaryProfileBytes)
+                  && !settingsStore.Load().Profile.SavedOperatingIntent,
+                "local Start writes only the dedicated local profile and leaves the ordinary profile byte-for-byte unchanged");
+            var first = localScenario.RunOnceAsync().GetAwaiter().GetResult();
+            PumpDispatcher(application.Dispatcher);
+            check(first.Succeeded && localScenario.SyntheticPositions.Count == 1
+                  && localScenario.SyntheticOpenOrders.Count == 1 && wakeProtection.IsRequestHeld
+                  && powerRequests.Contains(true),
+                "local Start runs the same synthetic cycle and requests wake protection for its owned position");
+            check(Get<Button>(window, "LocalScenarioClosePositionButton").Visibility == Visibility.Visible
+                  && Get<TextBlock>(window, "OperatingStatusText").Text.Contains("СОПРОВОЖДЕНИЕ", StringComparison.Ordinal)
+                  && Get<TextBlock>(window, "LocalScenarioActivityText").Text.Contains("Сопровождение", StringComparison.Ordinal),
+                "overview reports actual position monitoring and exposes only the synthetic close control");
+            RenderWindow(window, Path.Combine(artifactDirectory, "block-c-local-loop-monitoring-760x560.png"));
+
+            InvokeAutomation(stop);
+            PumpUntil(() => !localScenario.HasSavedStart && !localScenario.Loop.IsAdmitting
+                && localScenario.SyntheticOpenOrders.Count == 0, application,
+                "saved local Stop and exact remainder cancellation");
+            check(File.ReadAllBytes(settingsStore.PathName).SequenceEqual(ordinaryProfileBytes)
+                  && !settingsStore.Load().Profile.SavedOperatingIntent,
+                "local Stop writes only the dedicated local profile and leaves the ordinary profile byte-for-byte unchanged");
+            check(!localScenario.Loop.IsAdmitting && localScenario.SyntheticOpenOrders.Count == 0
+                  && localScenario.SyntheticPositions.Count == 1 && wakeProtection.IsRequestHeld,
+                "Stop persists closed admission, cancels the exact remainder, and keeps wake protection for the position");
+
+            SelectMode(application, window, 0);
+            PumpUntil(() => settingsStore.Load().Profile.SelectedMode == "Test"
+                && localScenario.Loop.Profile.SelectedMode == "Test"
+                && Get<TextBlock>(window, "SettingsStatusText").Text.Contains("Режим сохранён", StringComparison.Ordinal), application,
+                "coherent Test mode transition");
+            check(!settingsStore.Load().Profile.SavedOperatingIntent && !localScenario.Loop.Profile.SavedOperatingIntent
+                  && localScenario.SyntheticPositions.Count == 1 && localScenario.Snapshot().HasOwnedMonitoring,
+                "Test persists mode and Stop while the already-open owned position remains monitored");
+
+            Get<ListBox>(window, "NavigationList").SelectedIndex = 3;
+            PumpDispatcher(application.Dispatcher);
+            var aiTestStart = Get<Button>(window, "StartAiTestButton");
+            check(aiTestStart.IsEnabled && session.OpenCalls == 0 && session.CheckCalls == 0,
+                "analysis-only AI Test remains available without opening or checking a live session");
+            InvokeAutomation(aiTestStart);
+            PumpUntil(() => Get<Button>(window, "OpenAiReportButton").IsEnabled,
+                application, "analysis-only test batch completion");
+            check(Get<TextBlock>(window, "AiTestStatusText").Text == "Синтетический пакет завершён."
+                  && localScenario.SyntheticPositions.Count == 1 && wakeProtection.IsRequestHeld
+                  && session.OpenCalls == 0 && session.CheckCalls == 0,
+                "AI Test completes while the stopped local loop continues protecting its synthetic position");
+
+            Get<ListBox>(window, "NavigationList").SelectedIndex = 0;
+            PumpDispatcher(application.Dispatcher);
+            window.Close();
+            PumpDispatcher(application.Dispatcher);
+            check(!window.IsVisible && localScenario.Snapshot().HasOwnedMonitoring
+                  && !localScenario.Loop.Profile.SavedOperatingIntent && wakeProtection.IsRequestHeld,
+                "closing the window hides it to tray without stopping saved position monitoring");
+            window.Show();
+            PumpDispatcher(application.Dispatcher);
+            InvokeAutomation(closePosition);
+            var monitored = localScenario.ManagedOrders.Single(order => order.PositionQuantity > 0m);
+            clock.UtcNow = monitored.NextManagementCheckAt
+                ?? throw new InvalidOperationException("Synthetic position has no scheduled management check.");
+            localScenario.RunOnceAsync().GetAwaiter().GetResult();
+            PumpUntil(() => localScenario.SyntheticPositions.Count == 0 && !wakeProtection.IsRequestHeld,
+                application, "final synthetic position close and wake release");
+            check(powerRequests.Contains(true) && powerRequests[^1] == false
+                  && localScenario.LocalNotifications.Count > 0,
+                "wake request is released after final exposure closes; notifications only followed actual scenario events");
+        }
+        finally
+        {
+            window.AllowApplicationClose();
+            window.Close();
+            localScenario.Dispose();
+        }
+
+        var blockedParent = Path.Combine(root, "not-a-directory");
+        File.WriteAllText(blockedParent, "fixed local startup fixture");
+        var unavailable = LocalTradingScenario.TryCreate(Path.Combine(blockedParent, "scenario"), profile,
+            out var unavailableReason, new FakeClock(InitialTime), automaticScheduling: false);
+        check(unavailable is null && unavailableReason?.Contains("IOException", StringComparison.Ordinal) == true,
+            "a local scenario storage failure is returned as an optional fail-closed result");
+        var shellStore = new SettingsStore(Path.Combine(root, "unavailable-shell-settings.json"));
+        check(shellStore.Save(profile).Succeeded, "fail-closed WPF shell fixture saves ordinary settings");
+        using var shellWake = new WakeProtectionController(true, _ => true);
+        var unavailableWindow = new MainWindow(shellStore, shellStore.Load(), shellWake,
+            new TrueNorthSessionChecks.RecordingSessionService(), new SyntheticAiAnalysisSource(),
+            new AiTestReportStore(Path.Combine(root, "unavailable-ai-reports")),
+            localScenarioUnavailableReason: unavailableReason)
+        {
+            Width = 760,
+            Height = 560
+        };
+        unavailableWindow.Show();
+        PumpDispatcher(application.Dispatcher);
+        check(unavailableWindow.IsVisible
+              && !Get<Button>(unavailableWindow, "LocalScenarioStartButton").IsEnabled
+              && Get<TextBlock>(unavailableWindow, "LocalScenarioPauseText").Text.Contains("IOException", StringComparison.Ordinal)
+              && Get<TextBlock>(unavailableWindow, "OperatingStatusText").Text.Contains("ОТКЛЮЧЁН", StringComparison.Ordinal),
+            "local storage failure leaves the normal WPF shell open, explains the cause, and disables local Start");
+        unavailableWindow.AllowApplicationClose();
+        unavailableWindow.Close();
+        PumpDispatcher(application.Dispatcher);
+    }
+
+    private static void CheckExitConfirmationWindows(Action<bool, string> check, Application application)
+    {
+        var entries = new LocalScenarioExitSnapshot(true,
+            [new("intent-1", "order-1", "SOL", "SOL-PERP", 1m),
+             new("intent-2", "order-2", "BTC", "BTC-PERP", 2m)],
+            "Подтверждено открытых программных заявок: 2.", []);
+        var cancel = InvokeExitDialog(application, entries, "CancelEntriesButton");
+        check(cancel.Action == ExitConfirmationAction.CancelEntries
+              && cancel.FindName("ExitEntriesText") is TextBlock countText
+              && countText.Text.Contains("2", StringComparison.Ordinal)
+              && Get<Button>(cancel, "CancelEntriesButton").Visibility == Visibility.Visible,
+            "exit dialog presents the exact confirmed count and invokes cancellation through its accessible button");
+
+        var unknown = new LocalScenarioExitSnapshot(false, [],
+            "Количество заявок не подтверждено.", ["SOL · order-1: исход неизвестен; требуется сверка."]);
+        var leave = InvokeExitDialog(application, unknown, "LeaveButton");
+        check(leave.Action == ExitConfirmationAction.Leave
+              && Get<TextBlock>(leave, "ExitEntriesText").Text.Contains("неизвестно", StringComparison.OrdinalIgnoreCase)
+              && Get<Button>(leave, "CancelEntriesButton").Visibility == Visibility.Collapsed
+              && Get<TextBlock>(leave, "ExitResultsText").Text.Contains("исход неизвестен", StringComparison.Ordinal),
+            "unknown cancellation is shown before explicit Leave and disables unsafe exact-ID cancellation");
+
+        var returned = InvokeExitDialog(application,
+            new LocalScenarioExitSnapshot(true, [], "Подтверждено открытых программных заявок: 0.", []),
+            "ReturnButton");
+        check(returned.Action == ExitConfirmationAction.Return
+              && Get<Button>(returned, "CancelEntriesButton").Visibility == Visibility.Collapsed,
+            "Return is a distinct accessible exit outcome when no opening requests remain");
+    }
+
+    private static ExitConfirmationWindow InvokeExitDialog(
+        Application application,
+        LocalScenarioExitSnapshot snapshot,
+        string buttonName)
+    {
+        var dialog = new ExitConfirmationWindow(snapshot);
+        application.Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() =>
+        {
+            var button = Get<Button>(dialog, buttonName);
+            if (!button.IsEnabled || button.Visibility != Visibility.Visible
+                || AutomationProperties.GetName(button).Length == 0)
+                throw new InvalidOperationException($"Exit action {buttonName} is not accessible.");
+            InvokeAutomation(button);
+        }));
+        dialog.ShowDialog();
+        return dialog;
+    }
+
+    private static T Get<T>(Window window, string name) where T : FrameworkElement =>
+        (T)(window.FindName(name) ?? throw new InvalidOperationException($"WPF control not found: {name}"));
+
+    private static void SelectMode(Application application, Window window, int index)
+    {
+        application.Dispatcher.BeginInvoke(DispatcherPriority.Input,
+            new Action(() => Get<ListBox>(window, "ModeList").SelectedIndex = index));
+        PumpDispatcher(application.Dispatcher);
+    }
+
+    private static void InvokeAutomation(Button button)
+    {
+        var peer = UIElementAutomationPeer.CreatePeerForElement(button) ?? new ButtonAutomationPeer(button);
+        var invoke = peer.GetPattern(PatternInterface.Invoke) as IInvokeProvider
+            ?? throw new InvalidOperationException("Button does not expose the Invoke automation pattern.");
+        invoke.Invoke();
+    }
+
+    private static void PumpUntil(Func<bool> condition, Application application, string description)
+    {
+        for (var attempt = 0; attempt < 400; attempt++)
+        {
+            if (condition())
+                return;
+            PumpDispatcher(application.Dispatcher);
+            Thread.Sleep(2);
+        }
+        throw new InvalidOperationException("Timed out waiting for " + description + ".");
+    }
+
+    private static void PumpDispatcher(Dispatcher dispatcher)
+    {
+        var frame = new DispatcherFrame();
+        dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle,
+            new Action(() => frame.Continue = false));
+        Dispatcher.PushFrame(frame);
+    }
+
+    private static void RenderWindow(Window window, string path)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var bitmap = new RenderTargetBitmap((int)Math.Ceiling(window.ActualWidth),
+            (int)Math.Ceiling(window.ActualHeight), 96, 96, PixelFormats.Pbgra32);
+        bitmap.Render(window);
+        var encoder = new PngBitmapEncoder();
+        encoder.Frames.Add(BitmapFrame.Create(bitmap));
+        using var stream = File.Create(path);
+        encoder.Save(stream);
     }
 
     private static async Task CheckNoSetupSurvivesRestart(Action<bool, string> check, string root)

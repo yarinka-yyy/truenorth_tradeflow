@@ -12,6 +12,7 @@ using TrueNorth.TradeFlow.Notifications;
 using TrueNorth.TradeFlow.Orders;
 using TrueNorth.TradeFlow.Recovery;
 using TrueNorth.TradeFlow.Risk;
+using TrueNorth.TradeFlow.Trading;
 
 namespace TrueNorth.TradeFlow;
 
@@ -26,6 +27,9 @@ public partial class MainWindow : Window
     private readonly NotificationDispatcher? _notificationDispatcher;
     private readonly TelegramCredentialStore? _telegramCredentialStore;
     private readonly Func<LocalOrderLifecycleExampleSession> _orderLifecycleExampleFactory;
+    private readonly LocalTradingScenario? _localTradingScenario;
+    private readonly string? _localScenarioUnavailableReason;
+    private readonly SemaphoreSlim _profileCommandGate = new(1, 1);
     private readonly ObservableCollection<AssetDraft> _assetRows = [];
     private SettingsProfile _savedProfile;
     private SettingsFileStatus _fileStatus;
@@ -34,6 +38,7 @@ public partial class MainWindow : Window
     private readonly bool _fallbackReadOnly;
     private bool _updatingMode;
     private bool _ready;
+    private bool _profileCommandBusy;
     private bool _allowClose;
     private bool _appliedPreventSleep;
     private TrueNorthSessionState _trueNorthSessionState = TrueNorthSessionState.Unknown;
@@ -64,7 +69,9 @@ public partial class MainWindow : Window
         NotificationDispatcher? notificationDispatcher = null,
         TelegramCredentialStore? telegramCredentialStore = null,
         string? processRecoveryStatus = null,
-        Func<LocalOrderLifecycleExampleSession>? orderLifecycleExampleFactory = null)
+        Func<LocalOrderLifecycleExampleSession>? orderLifecycleExampleFactory = null,
+        LocalTradingScenario? localTradingScenario = null,
+        string? localScenarioUnavailableReason = null)
     {
         InitializeComponent();
         _settingsStore = settingsStore;
@@ -80,9 +87,13 @@ public partial class MainWindow : Window
         _recoveryCoordinator = recoveryCoordinator;
         _notificationDispatcher = notificationDispatcher;
         _telegramCredentialStore = telegramCredentialStore;
+        _localTradingScenario = localTradingScenario;
+        _localScenarioUnavailableReason = localScenarioUnavailableReason;
         _orderLifecycleExampleFactory = orderLifecycleExampleFactory
             ?? (() => new LocalOrderLifecycleExampleSession());
         _wakeProtection.StateChanged += UpdatePowerStatusFromController;
+        if (_localTradingScenario is not null)
+            _localTradingScenario.StateChanged += UpdateLocalTradingStatusFromScenario;
         if (_recoveryCoordinator is not null)
             _recoveryCoordinator.StatusChanged += UpdateRecoveryStatusFromCoordinator;
         _appliedPreventSleep = _savedProfile.Settings.PreventSleep;
@@ -116,6 +127,7 @@ public partial class MainWindow : Window
         _ready = true;
 
         UpdateMonitoringIntent();
+        UpdateLocalTradingStatus();
         UpdateRecoveryStatus();
         UpdateProcessRecoveryStatus(processRecoveryStatus);
         UpdatePowerStatus();
@@ -349,7 +361,7 @@ public partial class MainWindow : Window
         }));
     }
 
-    private void Mode_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private async void Mode_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (!_ready || _updatingMode)
             return;
@@ -358,39 +370,88 @@ public partial class MainWindow : Window
         if (requested == _savedProfile.SelectedMode)
             return;
 
-        if (_fallbackReadOnly)
+        await _profileCommandGate.WaitAsync();
+        _profileCommandBusy = true;
+        UpdateLocalTradingStatus();
+        try
         {
-            SetModeSelection(_savedProfile.SelectedMode);
-            UpdateModeLabel();
-            var message = ReadOnlyFallbackMessage();
-            SetOverviewModeStatus(message);
-            SetStatus(message, warning: true);
-            return;
-        }
+            if (requested == _savedProfile.SelectedMode)
+            {
+                SetModeSelection(_savedProfile.SelectedMode);
+                return;
+            }
 
-        var updated = _savedProfile.Copy();
-        updated.SelectedMode = requested;
-        var result = _settingsStore.Save(updated);
-        if (!result.Succeeded)
+            if (_fallbackReadOnly)
+            {
+                SetModeSelection(_savedProfile.SelectedMode);
+                UpdateModeLabel();
+                var message = ReadOnlyFallbackMessage();
+                SetOverviewModeStatus(message);
+                SetStatus(message, warning: true);
+                return;
+            }
+
+            var updated = _savedProfile.Copy();
+            updated.SelectedMode = requested;
+            if (requested == "Test")
+                updated.SavedOperatingIntent = false;
+
+            TradingLoopOutcome? scenarioResult = null;
+            if (_localTradingScenario is not null)
+            {
+                scenarioResult = await _localTradingScenario.UpdateProfileAsync(updated);
+                if (!scenarioResult.Succeeded)
+                {
+                    SetModeSelection(_savedProfile.SelectedMode);
+                    UpdateModeLabel();
+                    UpdateMonitoringIntent();
+                    UpdateLocalTradingStatus();
+                    var message = "Режим приложения не изменён: локальный профиль не подтвердил сохранение режима и Stop. "
+                        + scenarioResult.Status;
+                    SetOverviewModeStatus(message);
+                    SetStatus(message, warning: true);
+                    return;
+                }
+            }
+
+            var result = _settingsStore.Save(updated);
+            if (!result.Succeeded)
+            {
+                SetModeSelection(_savedProfile.SelectedMode);
+                UpdateModeLabel();
+                UpdateMonitoringIntent();
+                UpdateLocalTradingStatus();
+                var message = _localTradingScenario is null
+                    ? result.Message ?? "Не удалось сохранить выбранный режим."
+                    : "Режим приложения не сохранён. Локальный профиль обновлён отдельно и остаётся безопасно остановленным. "
+                        + (result.Message ?? result.Status.ToString());
+                SetOverviewModeStatus(message);
+                SetStatus(message, warning: true);
+                return;
+            }
+
+            _savedProfile = result.Profile!;
+            _notificationDispatcher?.UpdateSettings(_savedProfile.Settings);
+            _recoveryCoordinator?.UpdateSettings(_savedProfile.Settings);
+            _fileStatus = SettingsFileStatus.Loaded;
+            _loadMessage = null;
+            _canRecover = false;
+            UpdateModeLabel();
+            SetOverviewModeStatus(null);
+            ShowRecoveryButton(false);
+            UpdateMonitoringIntent();
+            UpdateLocalTradingStatus();
+            SetStatus(scenarioResult is { Succeeded: false }
+                ? "Режим сохранён. Локальный цикл остановлен, но часть заявок требует сверки: " + scenarioResult.Status
+                : "Режим сохранён. Несохранённые поля формы оставлены без изменений.",
+                warning: scenarioResult is { Succeeded: false });
+        }
+        finally
         {
-            SetModeSelection(_savedProfile.SelectedMode);
-            UpdateModeLabel();
-            var message = result.Message ?? "Не удалось сохранить выбранный режим.";
-            SetOverviewModeStatus(message);
-            SetStatus(message, warning: true);
-            return;
+            _profileCommandBusy = false;
+            _profileCommandGate.Release();
+            UpdateLocalTradingStatus();
         }
-
-        _savedProfile = result.Profile!;
-        _notificationDispatcher?.UpdateSettings(_savedProfile.Settings);
-        _recoveryCoordinator?.UpdateSettings(_savedProfile.Settings);
-        _fileStatus = SettingsFileStatus.Loaded;
-        _loadMessage = null;
-        _canRecover = false;
-        UpdateModeLabel();
-        SetOverviewModeStatus(null);
-        ShowRecoveryButton(false);
-        SetStatus("Режим сохранён. Несохранённые поля формы оставлены без изменений.", warning: false);
     }
 
     private void UpdatePage()
@@ -613,9 +674,184 @@ public partial class MainWindow : Window
 
     private void UpdateMonitoringIntent()
     {
-        OperatingIntentText.Text = _savedProfile.SavedOperatingIntent
-            ? "Сохранённое намерение: запустить. Фактический мониторинг не запущен."
-            : "Сохранённое намерение: остановить. Фактический мониторинг не запущен.";
+        if (_localTradingScenario is null)
+        {
+            OperatingIntentText.Text = _localScenarioUnavailableReason is not null
+                ? "Локальное намерение неизвестно: отдельный профиль не открылся."
+                : _savedProfile.SavedOperatingIntent
+                    ? "Сохранённое намерение: запустить. Фактический мониторинг не запущен."
+                    : "Сохранённое намерение: остановить. Фактический мониторинг не запущен.";
+            return;
+        }
+        var state = _localTradingScenario.Snapshot();
+        OperatingIntentText.Text = "Сохранённое локальное намерение: "
+            + (state.SavedOperatingIntent ? "Start." : "Stop.");
+    }
+
+    private void RealStart_Click(object sender, RoutedEventArgs e)
+    {
+        LocalScenarioActionStatusText.Text = "Реальный Start недоступен: чтение счёта, AI-провайдер и проверенные маршруты не подключены.";
+    }
+
+    private async void LocalScenarioStart_Click(object sender, RoutedEventArgs e)
+    {
+        await _profileCommandGate.WaitAsync();
+        _profileCommandBusy = true;
+        UpdateLocalTradingStatus();
+        try
+        {
+            if (_localTradingScenario is null)
+            {
+                LocalScenarioActionStatusText.Text = _localScenarioUnavailableReason
+                    ?? "Локальный сценарий не подключён в этой конфигурации окна.";
+                return;
+            }
+            if (_savedProfile.SelectedMode != "TrueNorth AI setups"
+                || _localTradingScenario.Snapshot().SelectedMode != "TrueNorth AI setups")
+            {
+                LocalScenarioActionStatusText.Text = "Для локального Start выберите режим TrueNorth AI setups и сохраните его в обоих профилях.";
+                return;
+            }
+            if (_fallbackReadOnly || _savedProfile.IsIncomplete())
+            {
+                LocalScenarioActionStatusText.Text = _fallbackReadOnly
+                    ? ReadOnlyFallbackMessage()
+                    : "Сначала сохраните активы, тип входа, размер и плечо в настройках.";
+                return;
+            }
+
+            LocalScenarioStartButton.IsEnabled = false;
+            try
+            {
+                var result = await _localTradingScenario.StartAsync(_savedProfile);
+                if (!result.Succeeded)
+                {
+                    LocalScenarioActionStatusText.Text = result.Status;
+                    return;
+                }
+
+                UpdateMonitoringIntent();
+                LocalScenarioActionStatusText.Text = result.Status;
+            }
+            catch (Exception)
+            {
+                LocalScenarioActionStatusText.Text = "Локальный Start не завершён; проверьте сохранённое состояние перед повтором.";
+            }
+        }
+        finally
+        {
+            _profileCommandBusy = false;
+            _profileCommandGate.Release();
+            UpdateLocalTradingStatus();
+        }
+    }
+
+    private async void LocalScenarioStop_Click(object sender, RoutedEventArgs e)
+    {
+        await _profileCommandGate.WaitAsync();
+        _profileCommandBusy = true;
+        UpdateLocalTradingStatus();
+        LocalScenarioStopButton.IsEnabled = false;
+        try
+        {
+            if (_localTradingScenario is null)
+            {
+                LocalScenarioActionStatusText.Text = _localScenarioUnavailableReason
+                    ?? "Локальный сценарий не подключён в этой конфигурации окна.";
+                return;
+            }
+            var stopped = await _localTradingScenario.StopAsync();
+            UpdateMonitoringIntent();
+            LocalScenarioActionStatusText.Text = stopped.Status;
+        }
+        catch (Exception)
+        {
+            LocalScenarioActionStatusText.Text = "Локальный Stop не завершил сверку; допуск остаётся закрытым.";
+        }
+        finally
+        {
+            _profileCommandBusy = false;
+            _profileCommandGate.Release();
+            UpdateLocalTradingStatus();
+        }
+    }
+
+    private async void LocalScenarioClosePosition_Click(object sender, RoutedEventArgs e)
+    {
+        if (_localTradingScenario is null)
+            return;
+        try
+        {
+            if (!await _localTradingScenario.CloseNextPositionAtTakeProfitAsync())
+            {
+                LocalScenarioActionStatusText.Text = "Нет защищённой локальной позиции для синтетического TP.";
+                return;
+            }
+            var result = await _localTradingScenario.RunOnceAsync();
+            LocalScenarioActionStatusText.Text = result.Status;
+        }
+        catch (Exception)
+        {
+            LocalScenarioActionStatusText.Text = "Синтетическое закрытие не подтверждено; локальный журнал требует сверки.";
+        }
+        finally
+        {
+            UpdateLocalTradingStatus();
+        }
+    }
+
+    private void UpdateLocalTradingStatusFromScenario()
+    {
+        if (_applicationClosing || Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished)
+            return;
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.BeginInvoke(new Action(UpdateLocalTradingStatusFromScenario));
+            return;
+        }
+        UpdateLocalTradingStatus();
+    }
+
+    private void UpdateLocalTradingStatus()
+    {
+        if (_localTradingScenario is null)
+        {
+            LocalScenarioCard.Visibility = _localScenarioUnavailableReason is null
+                ? Visibility.Collapsed : Visibility.Visible;
+            LocalScenarioActivityText.Text = "Локальный цикл не подключён.";
+            LocalScenarioPauseText.Text = _localScenarioUnavailableReason
+                ?? "Локальный сценарий недоступен в этой конфигурации окна.";
+            LocalScenarioProfileReviewText.Text = "Отдельный сохранённый профиль не загружен.";
+            LocalScenarioActionStatusText.Text = string.Empty;
+            LocalScenarioStartButton.IsEnabled = false;
+            LocalScenarioStopButton.IsEnabled = false;
+            LocalScenarioClosePositionButton.Visibility = Visibility.Collapsed;
+            OperatingStatusText.Text = _localScenarioUnavailableReason is null
+                ? "ТОРГОВЫЕ ФУНКЦИИ НЕ ЗАПУЩЕНЫ"
+                : "ЛОКАЛЬНЫЙ СЦЕНАРИЙ ОТКЛЮЧЁН";
+            _wakeProtection.SetActive(false);
+            return;
+        }
+
+        LocalScenarioCard.Visibility = Visibility.Visible;
+        var state = _localTradingScenario.Snapshot();
+        LocalScenarioActivityText.Text = state.Activity;
+        LocalScenarioPauseText.Text = state.PauseReason;
+        LocalScenarioProfileReviewText.Text = state.ProfileReview;
+        OperatingStatusText.Text = state.IsSearching ? "ЛОКАЛЬНЫЙ ПОИСК"
+            : state.HasOwnedMonitoring ? "СОПРОВОЖДЕНИЕ ПОЗИЦИЙ"
+            : state.SavedOperatingIntent && state.IsAdmitting ? "ОЖИДАНИЕ СРОКА ПОИСКА"
+            : state.SavedOperatingIntent ? "ЛОКАЛЬНЫЙ ЦИКЛ ПРИОСТАНОВЛЕН"
+            : "ЛОКАЛЬНЫЙ ЦИКЛ ОСТАНОВЛЕН";
+        LocalScenarioStartButton.IsEnabled = !_profileCommandBusy && _localTradingScenario.IsReady
+            && _savedProfile.SelectedMode == "TrueNorth AI setups"
+            && state.SelectedMode == "TrueNorth AI setups"
+            && !_savedProfile.IsIncomplete() && !state.SavedOperatingIntent && !_fallbackReadOnly;
+        LocalScenarioStopButton.IsEnabled = !_profileCommandBusy && state.SavedOperatingIntent;
+        LocalScenarioClosePositionButton.Visibility = state.OwnedPositionCount > 0
+            ? Visibility.Visible : Visibility.Collapsed;
+        LocalScenarioClosePositionButton.IsEnabled = state.OwnedPositionCount > 0;
+        _wakeProtection.SetActive(state.IsSearching || state.HasOwnedMonitoring);
     }
 
     private void UpdateRecoveryStatus()
@@ -748,7 +984,24 @@ public partial class MainWindow : Window
             _assetRows[index].Position = index + 1;
     }
 
-    private void SaveSettings_Click(object sender, RoutedEventArgs e)
+    private async void SaveSettings_Click(object sender, RoutedEventArgs e)
+    {
+        await _profileCommandGate.WaitAsync();
+        _profileCommandBusy = true;
+        UpdateLocalTradingStatus();
+        try
+        {
+            await SaveSettingsCoreAsync(sender, e);
+        }
+        finally
+        {
+            _profileCommandBusy = false;
+            _profileCommandGate.Release();
+            UpdateLocalTradingStatus();
+        }
+    }
+
+    private async Task SaveSettingsCoreAsync(object sender, RoutedEventArgs e)
     {
         if (_fallbackReadOnly)
         {
@@ -819,6 +1072,8 @@ public partial class MainWindow : Window
         _savedProfile = result.Profile!;
         _notificationDispatcher?.UpdateSettings(_savedProfile.Settings);
         _recoveryCoordinator?.UpdateSettings(_savedProfile.Settings);
+        var localResult = _localTradingScenario is null
+            ? null : await _localTradingScenario.UpdateProfileAsync(_savedProfile);
         _fileStatus = SettingsFileStatus.Loaded;
         _loadMessage = null;
         _canRecover = false;
@@ -827,11 +1082,14 @@ public partial class MainWindow : Window
         _wakeProtection.SetEnabled(_appliedPreventSleep);
         LoadDraft(_savedProfile.Settings);
         UpdateMonitoringIntent();
+        UpdateLocalTradingStatus();
         UpdatePowerStatus();
         ShowRecoveryButton(false);
-        SetStatus(_savedProfile.IsIncomplete()
+        SetStatus(localResult is { Succeeded: false }
+            ? "Настройки сохранены, но локальный цикл не завершил сверку: " + localResult.Status
+            : _savedProfile.IsIncomplete()
             ? "Настройки сохранены. Торговый профиль пока заполнен частично."
-            : "Настройки сохранены.", warning: false);
+            : "Настройки сохранены.", warning: localResult is { Succeeded: false });
     }
 
     private SettingsProfile CollectDraft(out Dictionary<string, string> parseErrors)
@@ -895,7 +1153,24 @@ public partial class MainWindow : Window
             warning: _fileStatus is SettingsFileStatus.Corrupt or SettingsFileStatus.UnsupportedVersion or SettingsFileStatus.Unavailable);
     }
 
-    private void RecoverSettings_Click(object sender, RoutedEventArgs e)
+    private async void RecoverSettings_Click(object sender, RoutedEventArgs e)
+    {
+        await _profileCommandGate.WaitAsync();
+        _profileCommandBusy = true;
+        UpdateLocalTradingStatus();
+        try
+        {
+            await RecoverSettingsCoreAsync();
+        }
+        finally
+        {
+            _profileCommandBusy = false;
+            _profileCommandGate.Release();
+            UpdateLocalTradingStatus();
+        }
+    }
+
+    private async Task RecoverSettingsCoreAsync()
     {
         var result = _settingsStore.Recover();
         if (!result.Succeeded)
@@ -914,11 +1189,17 @@ public partial class MainWindow : Window
         LoadDraft(_savedProfile.Settings);
         _notificationDispatcher?.UpdateSettings(_savedProfile.Settings);
         _recoveryCoordinator?.UpdateSettings(_savedProfile.Settings);
+        var localResult = _localTradingScenario is null
+            ? null : await _localTradingScenario.UpdateProfileAsync(_savedProfile);
         UpdateMonitoringIntent();
+        UpdateLocalTradingStatus();
         UpdatePowerStatus();
         UpdateModeLabel();
         ShowRecoveryButton(false);
-        SetStatus("Последняя исправная копия восстановлена. Повреждённый файл сохранён рядом.", warning: false);
+        SetStatus(localResult is { Succeeded: false }
+            ? "Настройки восстановлены, но локальный цикл ожидает сверки: " + localResult.Status
+            : "Последняя исправная копия восстановлена. Повреждённый файл сохранён рядом.",
+            warning: localResult is { Succeeded: false });
     }
 
     private async void SendNotificationTest_Click(object sender, RoutedEventArgs e)

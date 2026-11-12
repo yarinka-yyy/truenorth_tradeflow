@@ -65,6 +65,7 @@ internal sealed class TradingLoopCoordinator
     private CancellationTokenSource? _activeCycle;
     private int _profileUpdateInProgress;
     private int _stopInProgress;
+    private int _exitHold;
     private bool _pendingSetupLoadedAtStartup;
     private string? _lastStatus;
 
@@ -93,8 +94,69 @@ internal sealed class TradingLoopCoordinator
     internal bool IsRunning => _admission.IsStarted;
     internal bool IsAdmitting => Volatile.Read(ref _profileUpdateInProgress) == 0
         && Volatile.Read(ref _stopInProgress) == 0 && _admission.IsAdmitting;
+    internal bool IsExitHeld => Volatile.Read(ref _exitHold) != 0;
+    internal SettingsProfile Profile => Volatile.Read(ref _profile).Copy();
     internal string Status => _lastStatus ?? _recovery.StatusText;
     internal TradingLoopState State => _recovery.TradingLoopState;
+
+    internal void CloseAdmissionForShutdown()
+    {
+        Interlocked.Exchange(ref _exitHold, 1);
+        _admission.Close();
+        CancelActiveCycle();
+    }
+
+    internal async Task HoldAdmissionForExitAsync()
+    {
+        CloseAdmissionForShutdown();
+        await _commandGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+        try
+        {
+            await _cycleGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+            _cycleGate.Release();
+        }
+        finally
+        {
+            _commandGate.Release();
+        }
+    }
+
+    internal async Task<TradingLoopOutcome> ResumeAfterExitAsync(CancellationToken cancellationToken = default)
+    {
+        await _commandGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (!IsExitHeld)
+                return SetStatus(false, "Проверка выхода уже завершена.");
+            await _cycleGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                var profile = Volatile.Read(ref _profile).Copy();
+                if (!await ReconcileAsync(profile, cancellationToken).ConfigureAwait(false))
+                    return SetStatus(false, _lastStatus ?? "После выхода не удалось завершить сверку.");
+
+                if (profile.SavedOperatingIntent && profile.SelectedMode == "TrueNorth AI setups"
+                    && !profile.IsIncomplete())
+                {
+                    var generation = _admission.Generation;
+                    if (!_admission.Open(generation))
+                        return SetStatus(false, "Намерение Start не восстановлено после сверки выхода.");
+                }
+                Interlocked.Exchange(ref _exitHold, 0);
+                return SetStatus(true, profile.SavedOperatingIntent
+                    ? "Сверка выхода завершена; сохранённое намерение Start восстановлено."
+                    : "Сверка выхода завершена; сохранённое намерение Stop сохранено.");
+            }
+            finally
+            {
+                _cycleGate.Release();
+            }
+        }
+        finally
+        {
+            _commandGate.Release();
+        }
+    }
 
     internal async Task<bool> UpdateProfileAsync(
         SettingsProfile profile,
@@ -107,6 +169,11 @@ internal sealed class TradingLoopCoordinator
         await _commandGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            if (IsExitHeld)
+            {
+                SetStatus(false, "Настройки нельзя менять во время подтверждения выхода.");
+                return false;
+            }
             if (Volatile.Read(ref _stopInProgress) != 0)
             {
                 SetStatus(false, "Изменение настроек ожидает завершения Stop.");
@@ -204,6 +271,8 @@ internal sealed class TradingLoopCoordinator
         await _commandGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            if (IsExitHeld)
+                return SetStatus(false, "Start заблокирован до завершения подтверждения выхода.");
             if (Volatile.Read(ref _stopInProgress) != 0)
                 return SetStatus(false, "Start ожидает завершения Stop.");
             var generation = _admission.Generation;
@@ -345,6 +414,8 @@ internal sealed class TradingLoopCoordinator
                 _admission.Close();
                 return SetStatus(true, "Новые входы остановлены; сверка и сопровождение продолжаются.");
             }
+            if (IsExitHeld)
+                return SetStatus(true, "Новые входы приостановлены для подтверждения выхода; сверка и сопровождение продолжаются.");
             if (profile.IsIncomplete())
                 return SetStatus(false, "Новые входы заблокированы: торговые настройки неполны.");
 
