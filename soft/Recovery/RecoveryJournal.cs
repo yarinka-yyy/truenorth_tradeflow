@@ -2,6 +2,7 @@ using System.IO;
 using System.Security;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using TrueNorth.TradeFlow.Account;
 using TrueNorth.TradeFlow.Notifications;
 using TrueNorth.TradeFlow.Orders;
 using TrueNorth.TradeFlow.Trading;
@@ -353,7 +354,8 @@ internal sealed class RecoveryJournalStore
         error = null;
         if (state?.Venues is null || state.Operations is null || state.ManagedOrders is null || state.Events is null
             || state.NotificationAttempts is null || state.TradingLoop is null
-            || state.TradingLoop.NextSearchAt is null || state.TradingLoop.ActiveFailureIds is null)
+            || state.TradingLoop.NextSearchAt is null || state.TradingLoop.ActiveFailureIds is null
+            || state.TradingLoop.LimitReassessments is null)
         {
             error = "Журнал восстановления содержит отсутствующий список.";
             return false;
@@ -369,7 +371,76 @@ internal sealed class RecoveryJournalStore
                     || pending.Request.OrderType is not ("MARKET" or "LIMIT")
                     || string.IsNullOrWhiteSpace(pending.Request.TemplateVersion)
                     || string.IsNullOrWhiteSpace(pending.Request.Prompt)
-                    || pending.Response is null || pending.Response.RawText is null))
+                    || pending.Response is null || pending.Response.RawText is null
+                    || pending.LimitReassessmentMinutes is <= 0
+                    || pending.PreparedEntry is { } prepared
+                        && !ValidPreparedEntry(prepared, pending.Request)
+                    || pending.ReplacesIntentId is { } replacesIntentId
+                        && (!ValidJournalId(replacesIntentId) || pending.PreparedEntry is null
+                            || !state.TradingLoop.LimitReassessments.TryGetValue(replacesIntentId,
+                                out var replacing)
+                            || replacing is null
+                            || replacing.Phase != LimitReassessmentPhase.ReplacementPendingEntry
+                            || replacing.ReplacementIntent != pending.PreparedEntry
+                            || replacing.Request.Id != pending.Request.Id
+                            || replacing.Decision?.ReplacementResponse != pending.Response
+                            || replacing.DecisionReceivedAt != pending.ReceivedAt))
+            || state.TradingLoop.LimitReassessments.Any(item => !ValidJournalId(item.Key)
+                || item.Value is not { } reassessment || item.Key != reassessment.IntentId
+                || !ValidJournalId(reassessment.IntentId)
+                || reassessment.Request is null || reassessment.Request.Id == Guid.Empty
+                || !ValidAssetKey(reassessment.Request.Asset)
+                || reassessment.Request.Market != reassessment.Request.Asset + "-USDC"
+                || reassessment.Request.OrderType != "LIMIT"
+                || string.IsNullOrWhiteSpace(reassessment.Request.TemplateVersion)
+                || string.IsNullOrWhiteSpace(reassessment.Request.Prompt)
+                || reassessment.OriginResponse is null
+                || reassessment.OriginResponse.ResponseRequestId != reassessment.Request.Id
+                || reassessment.OriginResponse.RawText is null || !reassessment.OriginResponse.IsFinalStream
+                || reassessment.ReceivedAt == default || reassessment.IntervalMinutes <= 0
+                || reassessment.ReplacementIntervalMinutes is <= 0
+                || reassessment.ReplacementIntent is { } replacementIntent
+                    && (reassessment.Phase != LimitReassessmentPhase.ReplacementPendingEntry
+                        || !ValidPreparedEntry(replacementIntent, reassessment.Request)
+                        || replacementIntent.IntentId == reassessment.IntentId
+                        || state.TradingLoop.PendingSetup is not { } replacementPending
+                        || replacementPending.ReplacesIntentId != reassessment.IntentId
+                        || replacementPending.Request.Id != reassessment.Request.Id
+                        || replacementPending.Response != reassessment.Decision?.ReplacementResponse
+                        || replacementPending.ReceivedAt != reassessment.DecisionReceivedAt
+                        || replacementPending.PreparedEntry != replacementIntent)
+                || reassessment.NextReassessmentAt == default || !Enum.IsDefined(reassessment.Phase)
+                || reassessment.AssessmentId != reassessment.Decision?.AssessmentId
+                || reassessment.Decision is { } decision
+                    && (decision.AssessmentId == Guid.Empty || decision.IntentId != reassessment.IntentId
+                        || decision.EntryOrderId != reassessment.EntryOrderId
+                        || reassessment.EntryOrderId is null
+                        || decision.OriginRequestId != reassessment.Request.Id
+                        || !Enum.IsDefined(decision.Outcome) || reassessment.DecisionReceivedAt is null
+                        || reassessment.DecisionReceivedAt == default
+                        || (decision.Outcome == LimitReassessmentOutcome.Replacement
+                            ? decision.ReplacementResponse is null
+                                || decision.ReplacementResponse.ResponseRequestId != reassessment.Request.Id
+                                || !decision.ReplacementResponse.IsFinalStream
+                                || decision.ReplacementResponse.RawText is null
+                            : decision.ReplacementResponse is not null))
+                || reassessment.Phase == LimitReassessmentPhase.WaitingForEntry
+                    && reassessment.Decision is not null
+                || reassessment.Phase == LimitReassessmentPhase.Scheduled
+                    && (reassessment.EntryOrderId is null || reassessment.Decision is not null)
+                || reassessment.Phase == LimitReassessmentPhase.CancelPending
+                    && (reassessment.EntryOrderId is null || reassessment.Decision is null
+                        || reassessment.CancellationConfirmedAt is not null)
+                || reassessment.Phase == LimitReassessmentPhase.ReplacementPendingEntry
+                    && (reassessment.EntryOrderId is null || reassessment.Decision?.Outcome
+                        != LimitReassessmentOutcome.Replacement || reassessment.CancellationConfirmedAt is null)
+                || reassessment.Phase == LimitReassessmentPhase.ReplacementReady
+                    && (reassessment.EntryOrderId is null || reassessment.Decision?.Outcome
+                        != LimitReassessmentOutcome.Replacement || reassessment.CancellationConfirmedAt is null
+                        || reassessment.ReplacementIntent is not null)
+                || !state.ManagedOrders.Any(order => order.IntentId == reassessment.IntentId
+                    && order.EntryType == "Limit" && order.Asset == reassessment.Request.Asset
+                    && (reassessment.EntryOrderId is null || reassessment.EntryOrderId == order.EntryOrderId))))
         {
             error = "Журнал восстановления содержит недопустимое состояние цикла торговли.";
             return false;
@@ -506,6 +577,15 @@ internal sealed class RecoveryJournalStore
         && id.Length <= 256
         && id.All(character => char.IsAsciiLetterOrDigit(character)
             || character is ':' or '-' or '_' or '.');
+
+    private static bool ValidPreparedEntry(TradingLoopPreparedEntry entry, AiAnalysisRequest request) =>
+        Guid.TryParseExact(entry.IntentId, "N", out _) && entry.RequestId == request.Id
+        && !string.IsNullOrWhiteSpace(entry.Venue) && !string.IsNullOrWhiteSpace(entry.Account)
+        && !string.IsNullOrWhiteSpace(entry.Contract) && entry.Asset == request.Asset
+        && entry.EntryType == request.EntryType && Enum.IsDefined(entry.Direction)
+        && entry.Quantity > 0m && entry.TakeProfit > 0m && entry.StopLoss > 0m
+        && (entry.EntryType == "Limit" ? entry.LimitPrice is > 0m
+            : entry.EntryType == "Market" && entry.LimitPrice is null);
 
     private sealed record FileRead(
         RecoveryJournalStatus Status,

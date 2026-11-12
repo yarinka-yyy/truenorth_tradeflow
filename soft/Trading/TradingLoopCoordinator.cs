@@ -174,6 +174,12 @@ internal sealed class TradingLoopCoordinator
 
                 Volatile.Write(ref _profile, saved!.Profile!);
                 _recovery.UpdateSettings(saved.Profile!.Settings);
+                if (current.SavedOperatingIntent && !saved.Profile.SavedOperatingIntent
+                    && !await InvalidateLimitDecisionsOnStopAsync(CancellationToken.None).ConfigureAwait(false))
+                {
+                    SetStatus(false, "Режим сохранён, но поздние решения Limit не удалось сбросить.");
+                    return false;
+                }
                 SetStatus(true, updated.SelectedMode == "Test"
                     ? "Режим Test сохранён; новые входы остановлены, существующие заявки сохранены."
                     : updated.SavedOperatingIntent
@@ -219,6 +225,10 @@ internal sealed class TradingLoopCoordinator
                 }
                 if (_admission.Generation != generation)
                     return SetStatus(false, "Start отменён более поздней командой Stop или изменением настроек.");
+
+                if (!profile.SavedOperatingIntent
+                    && !await InvalidateLimitDecisionsOnStopAsync(cancellationToken).ConfigureAwait(false))
+                    return SetStatus(false, "Start заблокирован: результат переоценки после Stop не удалось сбросить.");
 
                 var startProfile = profile.Copy();
                 startProfile.SavedOperatingIntent = true;
@@ -280,6 +290,9 @@ internal sealed class TradingLoopCoordinator
                     await _orders.RunDueChecksAsync(order.IntentId, savedOperatingIntent: false, CancellationToken.None)
                         .ConfigureAwait(false);
 
+                if (!await InvalidateLimitDecisionsOnStopAsync(CancellationToken.None).ConfigureAwait(false))
+                    lifecycle = new(false, "Stop записан, но ожидающие решения по Limit не удалось сбросить.");
+
                 var status = intentSaved
                     ? lifecycle.Status
                     : "Новые входы остановлены в текущем процессе, но намерение Stop не записано. "
@@ -317,6 +330,10 @@ internal sealed class TradingLoopCoordinator
             var profile = Volatile.Read(ref _profile).Copy();
             if (!await ReconcileAsync(profile, cycle.Token).ConfigureAwait(false))
                 return SetStatus(false, _lastStatus ?? "Цикл ожидает общей сверки.");
+
+            var linkedOrder = await LinkPendingEntryAsync(cycle.Token).ConfigureAwait(false);
+            if (linkedOrder is { } linkResult)
+                return linkResult;
 
             var expiredCandidate = await DropExpiredCandidateAsync(cycle.Token).ConfigureAwait(false);
             if (expiredCandidate is { } expired)
@@ -362,6 +379,11 @@ internal sealed class TradingLoopCoordinator
             if (!_admission.IsAdmitting)
                 return SetStatus(false, "Область сбоя восстановления неизвестна; глобальный допуск закрыт.");
 
+            var limitOutcome = await ProcessLimitReassessmentsAsync(routes, profile, cycle.Token)
+                .ConfigureAwait(false);
+            if (limitOutcome is not null)
+                return limitOutcome;
+
             if (_state.PendingSetup is not null)
                 return await ProcessPendingSetupAsync(routes, accounts, contextReads, profile, cycle.Token)
                     .ConfigureAwait(false);
@@ -379,6 +401,10 @@ internal sealed class TradingLoopCoordinator
                     continue;
 
                 var assetRoutes = routes.Where(route => route.Asset == asset).ToArray();
+                if (_orders.Orders.Any(order => assetRoutes.Any(route => route.Venue == order.Venue
+                        && route.Account == order.Account && route.Contract == order.Contract)
+                    && ManagedOrderState.BlocksNewEntry(order)))
+                    continue;
                 TradingLoopRoute? queryRoute = null;
                 foreach (var route in assetRoutes)
                 {
@@ -628,6 +654,798 @@ internal sealed class TradingLoopCoordinator
             cancellationToken).ConfigureAwait(false);
     }
 
+    private async Task<TradingLoopOutcome?> LinkPendingEntryAsync(CancellationToken cancellationToken)
+    {
+        var pending = _state.PendingSetup;
+        if (pending is null)
+            return null;
+
+        var candidates = _orders.Orders.Where(order => order.Asset == pending.Request.Asset
+            && order.EntryType == pending.Request.EntryType && ManagedOrderState.BlocksNewEntry(order)).ToArray();
+        var prepared = pending.PreparedEntry;
+        if (prepared is null)
+            return candidates.Length == 0 ? null
+                : BlockGlobally("Старый сетап нельзя связать с точным IntentId; возможная заявка оставлена без изменений.");
+
+        if (!PreparedEntryMatchesSetup(prepared, pending.Request, pending.Response))
+            return BlockGlobally("Сохранённый IntentId не совпадает с исходным запросом и сетапом.");
+
+        var matches = _orders.Orders.Where(order => order.IntentId == prepared.IntentId).ToArray();
+        if (matches.Length > 1)
+            return BlockGlobally("Сохранённый IntentId связан с несколькими заявками; требуется сверка.");
+        if (matches.Length == 0)
+        {
+            if (candidates.Length > 0)
+                return BlockGlobally("Сетап и заявка не имеют точного общего IntentId; возможная заявка не усыновлена.");
+            return null;
+        }
+
+        var order = matches[0];
+        if (!PreparedEntryMatchesOrder(prepared, order))
+            return BlockGlobally("Сохранённый IntentId указывает на другой маршрут или параметры; заявка не изменена.");
+
+        if (pending.ReplacesIntentId is { } replacedIntentId)
+        {
+            if (replacedIntentId == prepared.IntentId
+                || !_state.LimitReassessments.TryGetValue(replacedIntentId, out var replaced)
+                || replaced.Phase != LimitReassessmentPhase.ReplacementPendingEntry
+                || replaced.ReplacementIntent != prepared
+                || replaced.CancellationConfirmedAt is null
+                || replaced.Decision?.Outcome != LimitReassessmentOutcome.Replacement
+                || replaced.Request.Id != pending.Request.Id
+                || replaced.Decision?.ReplacementResponse != pending.Response
+                || replaced.DecisionReceivedAt != pending.ReceivedAt)
+                return BlockGlobally("Сохранённая замена не связана с точным исходным Limit.");
+
+            var oldOrder = _orders.Orders.SingleOrDefault(item => item.IntentId == replacedIntentId);
+            if (oldOrder is null || oldOrder.ManagementMode == ManagedOrderManagementMode.Manual
+                || oldOrder.EntryTerminalState != ManagedEntryTerminalState.Cancelled
+                || oldOrder.RemainingQuantity != 0m || oldOrder.PositionQuantity != 0m
+                || oldOrder.FilledQuantity != 0m)
+                return BlockGlobally("Исходный Limit не подтверждён как отменённый без экспозиции; замена не связана.");
+        }
+
+        var limitReassessments = new Dictionary<string, TradingLoopLimitReassessment>(
+            _state.LimitReassessments, StringComparer.Ordinal);
+        if (pending.ReplacesIntentId is { } oldIntentId)
+            limitReassessments.Remove(oldIntentId);
+        if (order.EntryType == "Limit" && order.ManagementMode == ManagedOrderManagementMode.Application
+            && ManagedOrderState.BlocksNewEntry(order))
+        {
+            var receivedAt = pending.ReceivedAt ?? _clock.UtcNow;
+            var interval = pending.LimitReassessmentMinutes
+                ?? Volatile.Read(ref _profile).Settings.LimitReassessmentMinutes;
+            limitReassessments[order.IntentId] = CreateLimitReassessment(order, pending.Request,
+                pending.Response, receivedAt, interval);
+        }
+        if (!await SaveLoopStateAsync(_state with
+            {
+                PendingSetup = null,
+                LimitReassessments = limitReassessments,
+                LastStatus = order.ManagementMode == ManagedOrderManagementMode.Application
+                    ? "Заявка после перезапуска связана по точному IntentId и маршруту."
+                    : "Заявка передана владельцу; автоматическая переоценка отключена."
+            }, cancellationToken).ConfigureAwait(false))
+            return SetStatus(false, "Связь исходного ответа и заявки не удалось сохранить.", pending.Request.Asset,
+                order.IntentId);
+        if (!await _recovery.ClearTradingLoopFailureAsync(_state, pending.Request.Asset, cancellationToken)
+                .ConfigureAwait(false))
+        {
+            _admission.SetGlobalBlock(true);
+            return SetStatus(false, "Связь заявки сохранена, но сбой не закрыт в журнале.",
+                pending.Request.Asset, order.IntentId);
+        }
+        _state = _recovery.TradingLoopState;
+        return null;
+    }
+
+    private static bool PreparedEntryMatchesSetup(
+        TradingLoopPreparedEntry prepared,
+        AiAnalysisRequest request,
+        AiSourceResponse response)
+    {
+        if (!Guid.TryParseExact(prepared.IntentId, "N", out _)
+            || prepared.RequestId != request.Id || response.ResponseRequestId != request.Id
+            || !response.IsFinalStream || prepared.Asset != request.Asset
+            || prepared.EntryType != request.EntryType || string.IsNullOrWhiteSpace(prepared.Venue)
+            || string.IsNullOrWhiteSpace(prepared.Account) || string.IsNullOrWhiteSpace(prepared.Contract)
+            || prepared.Quantity <= 0m || prepared.TakeProfit <= 0m || prepared.StopLoss <= 0m)
+            return false;
+
+        var assessed = AiResponseAssessor.Assess(request, response);
+        if (assessed.Outcome != AiTestOutcome.CompleteSetup || assessed.Fields is not { } fields
+            || ToEligibilitySetup(request, fields) is null)
+            return false;
+
+        var direction = fields.Side == "LONG" ? PositionDirection.Long : PositionDirection.Short;
+        var expectedLimit = request.OrderType == "LIMIT" ? fields.EntryPrice : null;
+        return prepared.Direction == direction && prepared.LimitPrice == expectedLimit
+            && prepared.TakeProfit == fields.TakeProfit && prepared.StopLoss == fields.StopLoss;
+    }
+
+    private static bool PreparedEntryMatchesOrder(TradingLoopPreparedEntry prepared, ManagedOrderState order) =>
+        prepared.IntentId == order.IntentId && prepared.Venue == order.Venue && prepared.Account == order.Account
+        && prepared.Contract == order.Contract && prepared.Asset == order.Asset
+        && prepared.EntryType == order.EntryType && prepared.Direction == order.Direction
+        && prepared.Quantity == order.Quantity && prepared.LimitPrice == order.LimitPrice
+        && prepared.TakeProfit == order.TakeProfit && prepared.StopLoss == order.StopLoss;
+
+    private async Task<TradingLoopOutcome?> ProcessLimitReassessmentsAsync(
+        IReadOnlyList<TradingLoopRoute> routes,
+        SettingsProfile profile,
+        CancellationToken cancellationToken)
+    {
+        foreach (var savedReassessment in _state.LimitReassessments.Values
+                     .OrderBy(item => item.NextReassessmentAt).ToArray())
+        {
+            var reassessment = savedReassessment;
+            if (reassessment.Phase == LimitReassessmentPhase.ReplacementPendingEntry)
+            {
+                var pending = _state.PendingSetup;
+                if (pending?.ReplacesIntentId != reassessment.IntentId || pending.PreparedEntry is null
+                    || reassessment.ReplacementIntent != pending.PreparedEntry)
+                    return BlockGlobally("Старое состояние замены не содержит точный IntentId; требуется ручная сверка без повторной отправки.");
+                return await ContinueLimitReplacementAsync(reassessment, routes, profile, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            if (reassessment.Phase == LimitReassessmentPhase.ReplacementReady)
+                return await ContinueLimitReplacementAsync(reassessment, routes, profile, cancellationToken)
+                    .ConfigureAwait(false);
+
+            var order = _orders.Orders.SingleOrDefault(item => item.IntentId == reassessment.IntentId);
+            if (order is null)
+                return BlockGlobally("Связанный Limit отсутствует в журнале; переоценка и входы остановлены.");
+
+            if (order.ManagementMode == ManagedOrderManagementMode.Manual)
+            {
+                await RemoveLimitReassessmentAsync(reassessment,
+                    "Limit передан владельцу; автоматическая переоценка остановлена.", cancellationToken)
+                    .ConfigureAwait(false);
+                continue;
+            }
+
+            if (order.ManagementMode == ManagedOrderManagementMode.AwaitingOwnerChoice)
+            {
+                if (reassessment.Decision is not null)
+                {
+                    var reset = reassessment with
+                    {
+                        EntryOrderId = order.EntryOrderId,
+                        Phase = order.EntryOrderId is null
+                            ? LimitReassessmentPhase.WaitingForEntry : LimitReassessmentPhase.Scheduled,
+                        AssessmentId = null,
+                        Decision = null,
+                        DecisionReceivedAt = null,
+                        CancellationConfirmedAt = null,
+                        NextReassessmentAt = _clock.UtcNow.AddMinutes(reassessment.IntervalMinutes),
+                        LastStatus = "Переоценка приостановлена до решения владельца."
+                    };
+                    await SaveLimitReassessmentAsync(reset, cancellationToken).ConfigureAwait(false);
+                }
+                continue;
+            }
+
+            if (order.PendingOperationId is not null)
+                return SetStatus(false, "Переоценка Limit ожидает сверки уже отправленного действия.",
+                    order.Asset, order.IntentId);
+
+            if (reassessment.Phase == LimitReassessmentPhase.CancelPending)
+                return await ProcessLimitCancellationAsync(reassessment, profile, cancellationToken)
+                    .ConfigureAwait(false);
+
+            if (reassessment.Phase == LimitReassessmentPhase.WaitingForEntry)
+            {
+                if (order.EntryTerminalState == ManagedEntryTerminalState.Open && order.EntryOrderId is not null)
+                {
+                    await SaveLimitReassessmentAsync(reassessment with
+                    {
+                        EntryOrderId = order.EntryOrderId,
+                        Phase = LimitReassessmentPhase.Scheduled,
+                        LastStatus = "Точный ID Limit подтверждён; срок переоценки сохранён."
+                    }, cancellationToken).ConfigureAwait(false);
+                    reassessment = _state.LimitReassessments[reassessment.IntentId];
+                }
+                else if (order.EntryTerminalState is ManagedEntryTerminalState.Cancelled
+                         or ManagedEntryTerminalState.Filled or ManagedEntryTerminalState.Rejected)
+                {
+                    await RemoveLimitReassessmentAsync(reassessment,
+                        "Входящий Limit завершён; защитой позиции продолжает управлять 009.", cancellationToken)
+                        .ConfigureAwait(false);
+                    continue;
+                }
+                else
+                {
+                    continue;
+                }
+            }
+
+            if (order.EntryTerminalState != ManagedEntryTerminalState.Open)
+            {
+                await RemoveLimitReassessmentAsync(reassessment,
+                    "Входящий Limit завершён; защитой позиции продолжает управлять 009.", cancellationToken)
+                    .ConfigureAwait(false);
+                continue;
+            }
+            if (order.EntryOrderId is null || reassessment.EntryOrderId != order.EntryOrderId)
+                return BlockGlobally("Сохранённый ID Limit не совпадает с текущим; автоматическое действие заблокировано.");
+            if (reassessment.NextReassessmentAt > _clock.UtcNow)
+                continue;
+
+            return await ReassessLimitAsync(reassessment, order, profile, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        return null;
+    }
+
+    private async Task<TradingLoopOutcome> ReassessLimitAsync(
+        TradingLoopLimitReassessment reassessment,
+        ManagedOrderState order,
+        SettingsProfile profile,
+        CancellationToken cancellationToken)
+    {
+        var generation = _admission.Generation;
+        if (!LimitCycleAllowsAction(profile, generation))
+            return SetStatus(false, "Переоценка Limit отложена командой управления.", order.Asset, order.IntentId);
+
+        await _orders.RunDueChecksAsync(order.IntentId, savedOperatingIntent: false, cancellationToken, force: true)
+            .ConfigureAwait(false);
+        order = _orders.Orders.SingleOrDefault(item => item.IntentId == reassessment.IntentId) ?? order;
+        if (cancellationToken.IsCancellationRequested || !LimitCycleAllowsAction(profile, generation))
+            return SetStatus(false, "Переоценка Limit остановлена командой управления.", order.Asset, order.IntentId);
+        if (order.ManagementMode == ManagedOrderManagementMode.Manual)
+        {
+            await RemoveLimitReassessmentAsync(reassessment,
+                "Limit передан владельцу; поздняя переоценка отброшена.", CancellationToken.None)
+                .ConfigureAwait(false);
+            return SetStatus(false, "Ручная передача отключила переоценку Limit.", order.Asset, order.IntentId);
+        }
+        if (order.ManagementMode == ManagedOrderManagementMode.AwaitingOwnerChoice)
+            return SetStatus(false, "Переоценка приостановлена до решения владельца.", order.Asset, order.IntentId);
+        if (order.PendingOperationId is not null)
+            return SetStatus(false, "Переоценка ожидает сверки действия 009.", order.Asset, order.IntentId);
+        if (order.EntryTerminalState != ManagedEntryTerminalState.Open || order.EntryOrderId is null)
+        {
+            await RemoveLimitReassessmentAsync(reassessment,
+                "Limit исполнен или завершён; защитой позиции продолжает управлять 009.",
+                CancellationToken.None).ConfigureAwait(false);
+            return SetStatus(true, "Limit завершён до переоценки; состояние позиции сверено.", order.Asset,
+                order.IntentId);
+        }
+        if (order.EntryOrderId != reassessment.EntryOrderId)
+            return BlockGlobally("Точный ID Limit изменился до переоценки; автоматическое действие заблокировано.");
+
+        var origin = AiResponseAssessor.Assess(reassessment.Request, reassessment.OriginResponse);
+        if (origin.Outcome != AiTestOutcome.CompleteSetup || origin.Fields is null
+            || _analysis is not ITradingLoopLimitReassessmentSource source)
+            return await RecordLimitInconclusiveAsync(reassessment,
+                "Тестовый источник не подтвердил связанный исходный сетап для переоценки.",
+                CancellationToken.None).ConfigureAwait(false);
+
+        var assessmentId = Guid.NewGuid();
+        LimitReassessmentResult result;
+        try
+        {
+            result = await source.ReassessLimitAsync(new LimitReassessmentContext(assessmentId,
+                reassessment.IntentId, order.EntryOrderId, reassessment.Request, reassessment.OriginResponse,
+                origin.Fields, reassessment.ReceivedAt, order), cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return SetStatus(false, "Переоценка отменена командой управления; заявка и срок сохранены.",
+                order.Asset, order.IntentId);
+        }
+        catch (Exception exception)
+        {
+            if (!LimitCycleAllowsAction(profile, generation))
+                return SetStatus(false, "Поздняя переоценка после Stop или изменения настроек отброшена.",
+                    order.Asset, order.IntentId);
+            return await RecordLimitInconclusiveAsync(reassessment,
+                "Переоценка Limit завершилась ошибкой (" + SafeFailureKind(exception) + ").",
+                CancellationToken.None).ConfigureAwait(false);
+        }
+
+        if (cancellationToken.IsCancellationRequested || !LimitCycleAllowsAction(profile, generation))
+            return SetStatus(false, "Поздний ответ Limit после Stop или изменения настроек отброшен.",
+                order.Asset, order.IntentId);
+
+        await _orders.RunDueChecksAsync(order.IntentId, savedOperatingIntent: false, cancellationToken, force: true)
+            .ConfigureAwait(false);
+        var latest = _orders.Orders.SingleOrDefault(item => item.IntentId == reassessment.IntentId);
+        if (cancellationToken.IsCancellationRequested || !LimitCycleAllowsAction(profile, generation))
+            return SetStatus(false, "Поздний ответ Limit после Stop или изменения настроек отброшен.",
+                order.Asset, order.IntentId);
+        if (latest is null)
+            return BlockGlobally("Связанный Limit исчез после AI; автоматический результат отброшен.");
+        if (latest.ManagementMode == ManagedOrderManagementMode.Manual)
+        {
+            await RemoveLimitReassessmentAsync(reassessment,
+                "Ручная передача обнулила поздний ответ переоценки.", CancellationToken.None).ConfigureAwait(false);
+            return SetStatus(false, "Поздний ответ отброшен после передачи Limit владельцу.", latest.Asset,
+                latest.IntentId);
+        }
+        if (latest.ManagementMode == ManagedOrderManagementMode.AwaitingOwnerChoice)
+            return SetStatus(false, "Переоценка остановлена до решения владельца.", latest.Asset, latest.IntentId);
+        if (latest.PendingOperationId is not null)
+            return SetStatus(false, "Поздний ответ ожидает сверки действия 009.", latest.Asset, latest.IntentId);
+        if (latest.EntryTerminalState != ManagedEntryTerminalState.Open || latest.EntryOrderId is null)
+        {
+            await RemoveLimitReassessmentAsync(reassessment,
+                "Limit изменился во время переоценки; позиция остаётся на сопровождении 009.",
+                CancellationToken.None).ConfigureAwait(false);
+            return SetStatus(true, "Limit исполнился или завершился во время переоценки.", latest.Asset,
+                latest.IntentId);
+        }
+        if (latest.EntryOrderId != order.EntryOrderId
+            || latest.TakeProfit != order.TakeProfit || latest.StopLoss != order.StopLoss)
+            return await RecordLimitInconclusiveAsync(reassessment,
+                "Состояние заявки или защиты изменилось во время переоценки; ответ отброшен.",
+                CancellationToken.None).ConfigureAwait(false);
+
+        var reason = string.IsNullOrWhiteSpace(result?.Reason)
+            ? "Переоценка Limit не дала однозначного результата."
+            : result.Reason.Trim();
+        if (result is null || result.AssessmentId != assessmentId || result.IntentId != reassessment.IntentId
+            || result.EntryOrderId != order.EntryOrderId || result.OriginRequestId != reassessment.Request.Id
+            || !Enum.IsDefined(result.Outcome))
+            return await RecordLimitInconclusiveAsync(reassessment,
+                "Ответ переоценки не связан с исходным запросом и точным Limit.", CancellationToken.None)
+                .ConfigureAwait(false);
+
+        if (result.Outcome == LimitReassessmentOutcome.Keep)
+        {
+            if (result.ReplacementResponse is not null)
+                return await RecordLimitInconclusiveAsync(reassessment,
+                    "Ответ подтверждения актуальности содержит лишний сетап на замену.",
+                    CancellationToken.None).ConfigureAwait(false);
+            return await ScheduleLimitReassessmentAsync(reassessment,
+                "Переоценка подтвердила актуальность Limit.", CancellationToken.None).ConfigureAwait(false);
+        }
+        if (result.Outcome == LimitReassessmentOutcome.Inconclusive)
+            return await RecordLimitInconclusiveAsync(reassessment, reason, CancellationToken.None)
+                .ConfigureAwait(false);
+        if (result.Outcome == LimitReassessmentOutcome.InvalidNoReplacement
+            && result.ReplacementResponse is null)
+            return await SaveLimitDecisionAndCancelAsync(reassessment, result, profile, cancellationToken)
+                .ConfigureAwait(false);
+        if (result.Outcome != LimitReassessmentOutcome.Replacement || result.ReplacementResponse is null)
+            return await RecordLimitInconclusiveAsync(reassessment,
+                "Результат переоценки не содержит корректный исход для Limit.", CancellationToken.None)
+                .ConfigureAwait(false);
+
+        var replacement = AiResponseAssessor.Assess(reassessment.Request, result.ReplacementResponse);
+        var replacementSetup = replacement.Outcome == AiTestOutcome.CompleteSetup && replacement.Fields is not null
+            ? ToEligibilitySetup(reassessment.Request, replacement.Fields) : null;
+        if (replacementSetup is null || replacement.Fields is null)
+            return await RecordLimitInconclusiveAsync(reassessment,
+                "Сетап на замену неполон или не связан с исходным рынком.", CancellationToken.None)
+                .ConfigureAwait(false);
+        if (replacementSetup.EntryType != "Limit" || replacementSetup.Direction == order.Direction
+                && replacementSetup.LimitPrice == order.LimitPrice
+                && replacementSetup.TakeProfit == order.TakeProfit
+                && replacementSetup.StopLoss == order.StopLoss)
+            return await RecordLimitInconclusiveAsync(reassessment,
+                "Сетап на замену совпадает с действующим Limit и не создаёт нового сигнала.",
+                CancellationToken.None).ConfigureAwait(false);
+
+        return await SaveLimitDecisionAndCancelAsync(reassessment, result, profile, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task<TradingLoopOutcome> SaveLimitDecisionAndCancelAsync(
+        TradingLoopLimitReassessment reassessment,
+        LimitReassessmentResult result,
+        SettingsProfile profile,
+        CancellationToken cancellationToken)
+    {
+        if (cancellationToken.IsCancellationRequested)
+            return SetStatus(false, "Результат Limit отменён Stop; заявка остаётся под сопровождением 009.",
+                reassessment.Request.Asset, reassessment.IntentId);
+        var updated = reassessment with
+        {
+            Phase = LimitReassessmentPhase.CancelPending,
+            AssessmentId = result.AssessmentId,
+            Decision = result,
+            DecisionReceivedAt = _clock.UtcNow,
+            LastStatus = result.Outcome == LimitReassessmentOutcome.Replacement
+                ? "Сетап на замену сохранён; ожидается точная отмена старого остатка."
+                : "Утрата актуальности сохранена; ожидается точная отмена остатка без замены."
+        };
+        if (!await SaveLimitReassessmentAsync(updated, CancellationToken.None).ConfigureAwait(false))
+            return SetStatus(false, "Результат переоценки не сохранился; отмена не запущена.",
+                reassessment.Request.Asset, reassessment.IntentId);
+        return await ProcessLimitCancellationAsync(updated, profile, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<TradingLoopOutcome> ProcessLimitCancellationAsync(
+        TradingLoopLimitReassessment reassessment,
+        SettingsProfile profile,
+        CancellationToken cancellationToken)
+    {
+        if (reassessment.Decision is not { } decision)
+            return BlockGlobally("Отмена Limit не имеет сохранённого решения переоценки.");
+        var order = _orders.Orders.SingleOrDefault(item => item.IntentId == reassessment.IntentId);
+        if (order is null || reassessment.EntryOrderId is null || order.EntryOrderId != reassessment.EntryOrderId)
+            return BlockGlobally("Отмена не связана с точным исходным ID Limit.");
+        if (order.ManagementMode == ManagedOrderManagementMode.Manual)
+        {
+            await RemoveLimitReassessmentAsync(reassessment,
+                "Ручная передача обнулила сохранённое решение Limit.", CancellationToken.None).ConfigureAwait(false);
+            return SetStatus(false, "Limit передан владельцу; отмена и замена приложением отключены.",
+                order.Asset, order.IntentId);
+        }
+        if (order.ManagementMode == ManagedOrderManagementMode.AwaitingOwnerChoice)
+            return await ScheduleLimitReassessmentAsync(reassessment,
+                "Отмена приостановлена до решения владельца.", CancellationToken.None).ConfigureAwait(false);
+        if (order.PendingOperationId is not null)
+            return SetStatus(false, "Точная отмена уже отправлена; ожидается сверка 008/009.",
+                order.Asset, order.IntentId);
+
+        var generation = _admission.Generation;
+        if (!LimitCycleAllowsAction(profile, generation))
+            return SetStatus(false, "Отмена Limit остановлена командой управления.", order.Asset, order.IntentId);
+        await _orders.RunDueChecksAsync(order.IntentId, savedOperatingIntent: false, cancellationToken, force: true)
+            .ConfigureAwait(false);
+        order = _orders.Orders.SingleOrDefault(item => item.IntentId == reassessment.IntentId) ?? order;
+        if (order.ManagementMode == ManagedOrderManagementMode.Manual)
+        {
+            await RemoveLimitReassessmentAsync(reassessment,
+                "Ручная передача обнулила сохранённое решение Limit.", CancellationToken.None).ConfigureAwait(false);
+            return SetStatus(false, "Limit передан владельцу; отмена и замена приложением отключены.",
+                order.Asset, order.IntentId);
+        }
+        if (order.PendingOperationId is not null)
+            return SetStatus(false, "Точная отмена ожидает сверки 008/009.", order.Asset, order.IntentId);
+        if (order.EntryTerminalState != ManagedEntryTerminalState.Open)
+            return await CompleteLimitCancellationAsync(reassessment, order, profile, cancellationToken)
+                .ConfigureAwait(false);
+        if (order.EntryOrderId != reassessment.EntryOrderId)
+            return BlockGlobally("Точный Limit изменился перед отменой; автоматическое действие заблокировано.");
+
+        var expectedOrderId = order.EntryOrderId;
+        bool Fence(Func<bool> beginTransfer) => _admission.RunIfAdmitting(() =>
+            LimitCycleAllowsAction(profile, generation)
+            && _orders.Orders.Any(current => current.IntentId == reassessment.IntentId
+                && current.EntryOrderId == expectedOrderId
+                && current.ManagementMode == ManagedOrderManagementMode.Application
+                && current.EntryTerminalState == ManagedEntryTerminalState.Open
+                && (current.PendingOperationId is null
+                    || current.PendingAction == ManagedOrderAction.CancelRemainder))
+            && beginTransfer());
+        await _orders.CancelRemainderAsync(order.IntentId, savedOperatingIntent: true,
+            cancellationToken, transferAdmissionFence: Fence).ConfigureAwait(false);
+        order = _orders.Orders.SingleOrDefault(item => item.IntentId == reassessment.IntentId) ?? order;
+        if (order.PendingOperationId is not null)
+            return SetStatus(false, "Исход отмены неизвестен; точный Limit остаётся на сверке 008/009.",
+                order.Asset, order.IntentId);
+        return await CompleteLimitCancellationAsync(reassessment, order, profile, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task<TradingLoopOutcome> CompleteLimitCancellationAsync(
+        TradingLoopLimitReassessment reassessment,
+        ManagedOrderState order,
+        SettingsProfile profile,
+        CancellationToken cancellationToken)
+    {
+        if (order.ManagementMode == ManagedOrderManagementMode.Manual)
+        {
+            await RemoveLimitReassessmentAsync(reassessment,
+                "Ручная передача обнулила сохранённое решение Limit.", CancellationToken.None).ConfigureAwait(false);
+            return SetStatus(false, "Limit передан владельцу; замена заблокирована.", order.Asset, order.IntentId);
+        }
+        if (order.PendingOperationId is not null)
+            return SetStatus(false, "Исход отмены неизвестен; требуется сверка 008/009.", order.Asset,
+                order.IntentId);
+        if (order.FilledQuantity > 0m || order.PositionQuantity > 0m
+            || order.EntryTerminalState == ManagedEntryTerminalState.Filled)
+        {
+            await RemoveLimitReassessmentAsync(reassessment,
+                "Исполнение во время отмены оставлено под защитным сопровождением 009; замена заблокирована.",
+                CancellationToken.None).ConfigureAwait(false);
+            return SetStatus(true, "Исполнение сверено; защита позиции сохраняется, новая заявка не отправлена.",
+                order.Asset, order.IntentId);
+        }
+        if (order.EntryTerminalState == ManagedEntryTerminalState.Cancelled
+            && order.RemainingQuantity == 0m && order.PositionQuantity == 0m)
+        {
+            if (reassessment.Decision?.Outcome == LimitReassessmentOutcome.InvalidNoReplacement)
+            {
+                await RemoveLimitReassessmentAsync(reassessment,
+                    "Неактуальный Limit отменён; сетапа на замену нет.", CancellationToken.None)
+                    .ConfigureAwait(false);
+                return SetStatus(true, "Неактуальный Limit отменён без замены.", order.Asset, order.IntentId);
+            }
+            if (reassessment.Decision?.Outcome == LimitReassessmentOutcome.Replacement)
+            {
+                var awaiting = reassessment with
+                {
+                    Phase = LimitReassessmentPhase.ReplacementReady,
+                    CancellationConfirmedAt = _clock.UtcNow,
+                    ReplacementIntervalMinutes = profile.Settings.LimitReassessmentMinutes,
+                    ReplacementIntent = null,
+                    LastStatus = "Старый остаток отменён без экспозиции; ожидается новый допуск 007."
+                };
+                if (!await SaveLimitReassessmentAsync(awaiting, CancellationToken.None).ConfigureAwait(false))
+                    return SetStatus(false, "Подтверждённая отмена сохранена, но продолжение замены не записано.",
+                        order.Asset, order.IntentId);
+                return await ContinueLimitReplacementAsync(awaiting,
+                    _contexts.GetRoutes(profile).ToArray(), profile, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        if (order.EntryTerminalState == ManagedEntryTerminalState.Open
+            && order.LastAppliedOperationId?.StartsWith(order.IntentId + ":cancel:", StringComparison.Ordinal) == true)
+            return await RecordLimitInconclusiveAsync(reassessment,
+                "Точная отмена отклонена; остаток сохранён, повтор отмены заблокирован до новой переоценки.",
+                CancellationToken.None).ConfigureAwait(false);
+
+        return SetStatus(false, "Отмена не подтверждена; замена не отправлена, требуется сверка 009.",
+            order.Asset, order.IntentId);
+    }
+
+    private async Task<TradingLoopOutcome> ContinueLimitReplacementAsync(
+        TradingLoopLimitReassessment reassessment,
+        IReadOnlyList<TradingLoopRoute> routes,
+        SettingsProfile profile,
+        CancellationToken cancellationToken)
+    {
+        var oldOrder = _orders.Orders.SingleOrDefault(item => item.IntentId == reassessment.IntentId);
+        if (oldOrder is null || reassessment.Decision?.ReplacementResponse is not { } response
+            || reassessment.CancellationConfirmedAt is null)
+            return BlockGlobally("Сохранённая замена не имеет полной связи с отменённым Limit.");
+        if (reassessment.Phase is not (LimitReassessmentPhase.ReplacementReady
+            or LimitReassessmentPhase.ReplacementPendingEntry))
+            return BlockGlobally("Сохранённая замена находится вне ожидаемого этапа A.");
+        if (reassessment.Phase == LimitReassessmentPhase.ReplacementPendingEntry
+            && (_state.PendingSetup?.ReplacesIntentId != reassessment.IntentId
+                || _state.PendingSetup.PreparedEntry is null
+                || reassessment.ReplacementIntent != _state.PendingSetup.PreparedEntry
+                || _state.PendingSetup.Request.Id != reassessment.Request.Id
+                || _state.PendingSetup.Response != reassessment.Decision?.ReplacementResponse
+                || _state.PendingSetup.ReceivedAt != reassessment.DecisionReceivedAt))
+            return BlockGlobally("Восстановление старой замены без точного IntentId запрещено.");
+        if (oldOrder.ManagementMode == ManagedOrderManagementMode.Manual
+            || oldOrder.FilledQuantity > 0m || oldOrder.PositionQuantity > 0m
+            || oldOrder.EntryTerminalState == ManagedEntryTerminalState.Filled)
+        {
+            await RemoveLimitReassessmentAsync(reassessment,
+                "Состояние владельца или исполнение после отмены заблокировало замену.",
+                CancellationToken.None).ConfigureAwait(false);
+            return SetStatus(false, "Замена не отправлена; состояние позиции остаётся под контролем 009.",
+                oldOrder.Asset, oldOrder.IntentId);
+        }
+        if (oldOrder.PendingOperationId is not null)
+            return SetStatus(false, "Замена ожидает подтверждения отмены по журналу 008/009.",
+                oldOrder.Asset, oldOrder.IntentId);
+        if (oldOrder.EntryTerminalState != ManagedEntryTerminalState.Cancelled
+            || oldOrder.RemainingQuantity != 0m || oldOrder.PositionQuantity != 0m)
+            return BlockGlobally("Замену остановлено: старый Limit не подтверждён как отменённый без экспозиции.");
+
+        if (reassessment.DecisionReceivedAt is not { } decisionAt || decisionAt > _clock.UtcNow
+            || _clock.UtcNow - decisionAt >= PendingSetupLifetime)
+            return await RemoveLimitReassessmentAsync(reassessment,
+                "Сохранённый сетап замены просрочен; новый вход не отправлен.", cancellationToken)
+                .ConfigureAwait(false);
+
+        var parsed = AiResponseAssessor.Assess(reassessment.Request, response);
+        var fields = parsed.Outcome == AiTestOutcome.CompleteSetup ? parsed.Fields : null;
+        var setup = fields is null ? null : ToEligibilitySetup(reassessment.Request, fields);
+        if (setup is null || fields is null)
+            return await RemoveLimitReassessmentAsync(reassessment,
+                "Сохранённый сетап замены потерял полноту после подтверждённой отмены.", cancellationToken)
+                .ConfigureAwait(false);
+        if (profile.SelectedMode != "TrueNorth AI setups" || !profile.SavedOperatingIntent
+            || profile.Settings.EntryType != "Limit"
+            || !profile.Settings.Assets.Any(asset => string.Equals(asset?.Trim(), setup.Asset,
+                StringComparison.OrdinalIgnoreCase)))
+            return await RemoveLimitReassessmentAsync(reassessment,
+                "Настройки изменились после отмены; сохранённый сетап замены устарел.", cancellationToken)
+                .ConfigureAwait(false);
+
+        var assetRoutes = routes.Where(route => route.Asset == setup.Asset).ToArray();
+        if (assetRoutes.Length == 0 || !AiAnalysisRequestFactory.TryCreateBatch(setup.Asset,
+                profile.Settings.EntryType, out _, out _))
+            return await RemoveLimitReassessmentAsync(reassessment,
+                "Маршрут или текущий формат входа не подтверждает сохранённый сетап замены.", cancellationToken)
+                .ConfigureAwait(false);
+
+        var accounts = await ReadAccountsAsync(routes, cancellationToken).ConfigureAwait(false);
+        if (accounts.Values.Any(account => account is null))
+            return BlockGlobally("После отмены не удалось подтвердить все счета для допуска новой заявки.");
+        var snapshots = accounts.Values.Cast<AccountSnapshot>().ToArray();
+        var contexts = new Dictionary<TradingLoopRoute, TradingLoopContext>();
+        foreach (var route in assetRoutes)
+        {
+            var context = await _contexts.ReadAsync(route, snapshots, setup, profile, _clock.UtcNow,
+                cancellationToken).ConfigureAwait(false);
+            contexts[route] = context;
+            if (context.AllConnectedExposureCovered != true)
+                return BlockGlobally(context.Reason ?? "Экспозиция после отмены не подтверждена.");
+        }
+        var analysisRoute = FindEligibleSearchRoute(assetRoutes, accounts, contexts, profile, out var waitingReason);
+        if (analysisRoute is null)
+            return SetStatus(false, waitingReason ?? "Сетап замены ждёт свежего допуска 007.",
+                setup.Asset, reassessment.IntentId);
+
+        var intervalMinutes = profile.Settings.LimitReassessmentMinutes;
+        var pending = new TradingLoopPendingSetup(reassessment.Request, response,
+            decisionAt, intervalMinutes,
+            reassessment.Phase == LimitReassessmentPhase.ReplacementPendingEntry
+                ? reassessment.ReplacementIntent : null,
+            reassessment.IntentId);
+        var opened = await EvaluatePendingSetupAsync(pending, analysisRoute, routes, profile, cancellationToken)
+            .ConfigureAwait(false);
+        if (opened.IntentId is null)
+            return opened;
+
+        var newOrder = _orders.Orders.SingleOrDefault(item => item.IntentId == opened.IntentId);
+        if (newOrder is null)
+            return BlockGlobally("Новая заявка не связалась с восстановленным намерением после отмены.");
+        var statesAfterEntry = new Dictionary<string, TradingLoopLimitReassessment>(
+            _state.LimitReassessments, StringComparer.Ordinal);
+        statesAfterEntry.Remove(reassessment.IntentId);
+        if (newOrder.EntryType == "Limit" && ManagedOrderState.BlocksNewEntry(newOrder))
+            statesAfterEntry[newOrder.IntentId] = CreateLimitReassessment(newOrder, reassessment.Request, response,
+                reassessment.DecisionReceivedAt ?? _clock.UtcNow, intervalMinutes);
+        if (!await SaveLoopStateAsync(_state with
+            {
+                PendingSetup = null,
+                LimitReassessments = statesAfterEntry,
+                LastStatus = opened.Status
+            }, CancellationToken.None).ConfigureAwait(false))
+            return SetStatus(false, "Новая заявка отправлена, но состояние замены не удалось сохранить.",
+                newOrder.Asset, newOrder.IntentId);
+        if (!await _recovery.ClearTradingLoopFailureAsync(_state, newOrder.Asset, CancellationToken.None)
+                .ConfigureAwait(false))
+        {
+            _admission.SetGlobalBlock(true);
+            return SetStatus(false, "Ошибка замены не закрыта в журнале; новые входы заблокированы.",
+                newOrder.Asset, newOrder.IntentId);
+        }
+        _state = _recovery.TradingLoopState;
+        return opened;
+    }
+
+    private async Task<TradingLoopOutcome> ScheduleLimitReassessmentAsync(
+        TradingLoopLimitReassessment reassessment,
+        string status,
+        CancellationToken cancellationToken)
+    {
+        var scheduled = reassessment with
+        {
+            Phase = reassessment.EntryOrderId is null
+                ? LimitReassessmentPhase.WaitingForEntry : LimitReassessmentPhase.Scheduled,
+            AssessmentId = null,
+            Decision = null,
+            DecisionReceivedAt = null,
+            CancellationConfirmedAt = null,
+            NextReassessmentAt = _clock.UtcNow.AddMinutes(reassessment.IntervalMinutes),
+            LastStatus = status
+        };
+        if (!await SaveLimitReassessmentAsync(scheduled, cancellationToken).ConfigureAwait(false))
+            return SetStatus(false, "Следующий срок переоценки Limit не удалось сохранить.",
+                reassessment.Request.Asset, reassessment.IntentId);
+        if (!await _recovery.ClearTradingLoopFailureAsync(_state, reassessment.Request.Asset, cancellationToken)
+                .ConfigureAwait(false))
+        {
+            _admission.SetGlobalBlock(true);
+            return SetStatus(false, "Состояние ошибки переоценки не удалось закрыть; входы заблокированы.",
+                reassessment.Request.Asset, reassessment.IntentId);
+        }
+        _state = _recovery.TradingLoopState;
+        return SetStatus(true, status, reassessment.Request.Asset, reassessment.IntentId);
+    }
+
+    private async Task<TradingLoopOutcome> RecordLimitInconclusiveAsync(
+        TradingLoopLimitReassessment reassessment,
+        string reason,
+        CancellationToken cancellationToken)
+    {
+        var detail = string.IsNullOrWhiteSpace(reason)
+            ? "Переоценка Limit не дала однозначного результата."
+            : reason.Trim();
+        var scheduled = reassessment with
+        {
+            Phase = reassessment.EntryOrderId is null
+                ? LimitReassessmentPhase.WaitingForEntry : LimitReassessmentPhase.Scheduled,
+            AssessmentId = null,
+            Decision = null,
+            DecisionReceivedAt = null,
+            CancellationConfirmedAt = null,
+            NextReassessmentAt = _clock.UtcNow.AddMinutes(reassessment.IntervalMinutes),
+            LastStatus = detail
+        };
+        var states = new Dictionary<string, TradingLoopLimitReassessment>(
+            _state.LimitReassessments, StringComparer.Ordinal)
+        {
+            [scheduled.IntentId] = scheduled
+        };
+        var updated = _state with
+        {
+            LimitReassessments = states,
+            LastStatus = detail
+        };
+        if (!await _recovery.SaveTradingLoopFailureAsync(updated, reassessment.Request.Asset,
+                "Переоценка Limit не завершена; исходная заявка сохранена.", detail, cancellationToken)
+                .ConfigureAwait(false))
+        {
+            _admission.SetGlobalBlock(true);
+            return SetStatus(false, "Причину переоценки не удалось сохранить; новые входы закрыты.",
+                reassessment.Request.Asset, reassessment.IntentId);
+        }
+        _state = _recovery.TradingLoopState;
+        _lastStatus = _state.LastStatus;
+        return SetStatus(false, detail + $" Повтор после {scheduled.NextReassessmentAt:O}.",
+            reassessment.Request.Asset, reassessment.IntentId);
+    }
+
+    private async Task<TradingLoopOutcome> RemoveLimitReassessmentAsync(
+        TradingLoopLimitReassessment reassessment,
+        string status,
+        CancellationToken cancellationToken)
+    {
+        var states = new Dictionary<string, TradingLoopLimitReassessment>(
+            _state.LimitReassessments, StringComparer.Ordinal);
+        states.Remove(reassessment.IntentId);
+        if (!await SaveLoopStateAsync(_state with
+            {
+                LimitReassessments = states,
+                LastStatus = status
+            }, cancellationToken).ConfigureAwait(false))
+            return SetStatus(false, "Состояние переоценки Limit не удалось завершить в журнале.",
+                reassessment.Request.Asset, reassessment.IntentId);
+        if (!await _recovery.ClearTradingLoopFailureAsync(_state, reassessment.Request.Asset, cancellationToken)
+                .ConfigureAwait(false))
+        {
+            _admission.SetGlobalBlock(true);
+            return SetStatus(false, "Ошибка переоценки не закрыта в журнале; новые входы заблокированы.",
+                reassessment.Request.Asset, reassessment.IntentId);
+        }
+        _state = _recovery.TradingLoopState;
+        return SetStatus(true, status, reassessment.Request.Asset, reassessment.IntentId);
+    }
+
+    private async Task<bool> SaveLimitReassessmentAsync(
+        TradingLoopLimitReassessment reassessment,
+        CancellationToken cancellationToken)
+    {
+        var states = new Dictionary<string, TradingLoopLimitReassessment>(
+            _state.LimitReassessments, StringComparer.Ordinal)
+        {
+            [reassessment.IntentId] = reassessment
+        };
+        return await SaveLoopStateAsync(_state with
+        {
+            LimitReassessments = states,
+            LastStatus = reassessment.LastStatus
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private bool LimitCycleAllowsAction(SettingsProfile expectedProfile, long generation)
+    {
+        var current = Volatile.Read(ref _profile);
+        return _admission.IsAdmitting && _admission.Generation == generation
+            && Volatile.Read(ref _profileUpdateInProgress) == 0 && Volatile.Read(ref _stopInProgress) == 0
+            && current.SavedOperatingIntent && current.SelectedMode == "TrueNorth AI setups"
+            && expectedProfile.SavedOperatingIntent && expectedProfile.SelectedMode == "TrueNorth AI setups";
+    }
+
+    private static TradingLoopLimitReassessment CreateLimitReassessment(
+        ManagedOrderState order,
+        AiAnalysisRequest request,
+        AiSourceResponse response,
+        DateTimeOffset receivedAt,
+        int intervalMinutes) => new(
+        order.IntentId,
+        order.EntryOrderId,
+        request,
+        response,
+        receivedAt,
+        intervalMinutes,
+        order.CreatedAt.AddMinutes(intervalMinutes),
+        order.EntryOrderId is not null && order.EntryTerminalState == ManagedEntryTerminalState.Open
+            ? LimitReassessmentPhase.Scheduled : LimitReassessmentPhase.WaitingForEntry);
+
     private async Task<TradingLoopOutcome?> DropExpiredCandidateAsync(CancellationToken cancellationToken)
     {
         var pending = _state.PendingSetup;
@@ -696,7 +1514,8 @@ internal sealed class TradingLoopCoordinator
                 "Ответ AI неполный: " + string.Join(" ", assessed.Reasons),
                 "Ответ AI неполный; повторный поиск назначен по расписанию.", cancellationToken).ConfigureAwait(false);
 
-        var pending = new TradingLoopPendingSetup(request, response, _clock.UtcNow);
+        var pending = new TradingLoopPendingSetup(request, response, _clock.UtcNow,
+            profile.Settings.LimitReassessmentMinutes);
         var saved = await SaveAcceptedPendingSetupAsync(pending, profile, cancellationToken).ConfigureAwait(false);
         if (!saved.Succeeded)
             return saved;
@@ -763,7 +1582,8 @@ internal sealed class TradingLoopCoordinator
                 "Переоценка не подтвердила полный и свежий сетап.",
                 "Сохранённый сетап ожидает новой ясной переоценки.", profile, cancellationToken).ConfigureAwait(false);
 
-        var accepted = new TradingLoopPendingSetup(pending.Request, response, _clock.UtcNow);
+        var accepted = new TradingLoopPendingSetup(pending.Request, response, _clock.UtcNow,
+            profile.Settings.LimitReassessmentMinutes);
         var saved = await SaveAcceptedPendingSetupAsync(accepted, profile, cancellationToken).ConfigureAwait(false);
         if (!saved.Succeeded)
             return saved;
@@ -837,12 +1657,55 @@ internal sealed class TradingLoopCoordinator
                 "Полный сетап не содержит точных уровней для входа.", profile, cancellationToken)
                 .ConfigureAwait(false);
 
-        var intent = new ManagedOrderIntent(pool.Venue, pool.Account, asset, pool.Contract!,
-            setup.Direction.Value, pending.Request.EntryType, pool.Quantity.Value, assessed.Fields.EntryPrice,
+        var preparedCandidate = new TradingLoopPreparedEntry(Guid.NewGuid().ToString("N"),
+            pending.Request.Id, selectedRoute.Venue, selectedRoute.Account, selectedRoute.Contract,
+            asset, pending.Request.EntryType, setup.Direction.Value, pool.Quantity.Value,
+            pending.Request.OrderType == "LIMIT" ? assessed.Fields.EntryPrice : null,
             assessed.Fields.TakeProfit!.Value, assessed.Fields.StopLoss!.Value);
+        var preparedEntry = pending.PreparedEntry is { } priorPrepared
+            && priorPrepared with { IntentId = preparedCandidate.IntentId } == preparedCandidate
+                ? priorPrepared
+                : preparedCandidate;
+        pending = pending with { PreparedEntry = preparedEntry };
+
+        var statesBeforeEntry = new Dictionary<string, TradingLoopLimitReassessment>(
+            _state.LimitReassessments, StringComparer.Ordinal);
+        if (pending.ReplacesIntentId is { } replacedIntentId)
+        {
+            if (!statesBeforeEntry.TryGetValue(replacedIntentId, out var replaced)
+                || replaced.Phase is not (LimitReassessmentPhase.ReplacementReady
+                    or LimitReassessmentPhase.ReplacementPendingEntry)
+                || replaced.Decision?.Outcome != LimitReassessmentOutcome.Replacement
+                || replaced.Decision?.ReplacementResponse != pending.Response
+                || replaced.Request.Id != pending.Request.Id
+                || replaced.DecisionReceivedAt != pending.ReceivedAt
+                || replaced.CancellationConfirmedAt is null || replaced.IntentId == preparedEntry.IntentId)
+                return BlockGlobally("Новый IntentId замены не связан с отменённым Limit.");
+            statesBeforeEntry[replacedIntentId] = replaced with
+            {
+                Phase = LimitReassessmentPhase.ReplacementPendingEntry,
+                ReplacementIntent = preparedEntry,
+                ReplacementIntervalMinutes = pending.LimitReassessmentMinutes
+                    ?? profile.Settings.LimitReassessmentMinutes,
+                LastStatus = "IntentId и точный маршрут замены сохранены до границы передачи."
+            };
+        }
+        if (!await SaveLoopStateAsync(_state with
+            {
+                PendingSetup = pending,
+                LimitReassessments = statesBeforeEntry,
+                LastStatus = "Точный IntentId и маршрут входа сохранены до границы передачи."
+            }, cancellationToken).ConfigureAwait(false))
+            return SetStatus(false, "Точный IntentId не записан; вход не начат.", asset);
+
+        var intent = new ManagedOrderIntent(selectedRoute.Venue, selectedRoute.Account, asset,
+            selectedRoute.Contract, setup.Direction.Value, pending.Request.EntryType, pool.Quantity.Value,
+            assessed.Fields.EntryPrice, assessed.Fields.TakeProfit!.Value, assessed.Fields.StopLoss!.Value,
+            preparedEntry.IntentId);
         var generation = _admission.Generation;
         bool Fence(Func<bool> beginTransfer) => _admission.RunIfAdmitting(() =>
-            _admission.Generation == generation
+            Volatile.Read(ref _profileUpdateInProgress) == 0 && Volatile.Read(ref _stopInProgress) == 0
+            && _admission.Generation == generation
             && CurrentProfileAllowsEntry(intent, pending.Request, setup, profile, input, snapshots)
             && beginTransfer());
 
@@ -850,9 +1713,39 @@ internal sealed class TradingLoopCoordinator
             cancellationToken: cancellationToken, entryAdmissionFence: Fence).ConfigureAwait(false);
         if (opened.IntentId is not null)
         {
+            if (opened.IntentId != preparedEntry.IntentId)
+                return BlockGlobally("Order Lifecycle вернул другой IntentId; связь входа не доказана.");
+            var managed = _orders.Orders.SingleOrDefault(order => order.IntentId == opened.IntentId);
+            if (managed is null)
+            {
+                _admission.SetGlobalBlock(true);
+                return SetStatus(false, "Результат входа не связан с сохранённым намерением; сверка обязательна.",
+                    asset, opened.IntentId);
+            }
+
+            var limitReassessments = new Dictionary<string, TradingLoopLimitReassessment>(
+                _state.LimitReassessments, StringComparer.Ordinal);
+            if (pending.ReplacesIntentId is { } oldIntentId)
+                limitReassessments.Remove(oldIntentId);
+            if (managed.EntryType == "Limit" && ManagedOrderState.BlocksNewEntry(managed))
+            {
+                var interval = pending.LimitReassessmentMinutes ?? profile.Settings.LimitReassessmentMinutes;
+                limitReassessments[managed.IntentId] = new TradingLoopLimitReassessment(
+                    managed.IntentId,
+                    managed.EntryOrderId,
+                    pending.Request,
+                    pending.Response,
+                    pending.ReceivedAt ?? _clock.UtcNow,
+                    interval,
+                    managed.CreatedAt.AddMinutes(interval),
+                    managed.EntryTerminalState == ManagedEntryTerminalState.Open && managed.EntryOrderId is not null
+                        ? LimitReassessmentPhase.Scheduled : LimitReassessmentPhase.WaitingForEntry);
+            }
+
             if (!await SaveLoopStateAsync(_state with
                 {
                     PendingSetup = null,
+                    LimitReassessments = limitReassessments,
                     LastStatus = opened.Status
                 }, CancellationToken.None).ConfigureAwait(false))
                 return SetStatus(false, "Действие записано в журнале, но состояние сетапа не удалось очистить.",
@@ -1025,6 +1918,80 @@ internal sealed class TradingLoopCoordinator
         _state = _recovery.TradingLoopState;
         _lastStatus = _state.LastStatus;
         return SetStatus(false, detail, asset);
+    }
+
+    private async Task<bool> InvalidateLimitDecisionsOnStopAsync(CancellationToken cancellationToken)
+    {
+        var states = new Dictionary<string, TradingLoopLimitReassessment>(
+            _state.LimitReassessments, StringComparer.Ordinal);
+        var replacementIds = _state.LimitReassessments.Values
+            .Where(item => item.Phase is LimitReassessmentPhase.ReplacementReady
+                or LimitReassessmentPhase.ReplacementPendingEntry)
+            .Select(item => item.IntentId).ToHashSet(StringComparer.Ordinal);
+        var replacementRequestIds = _state.LimitReassessments.Values
+            .Where(item => replacementIds.Contains(item.IntentId))
+            .Select(item => item.Request.Id).ToHashSet();
+        var changed = false;
+        foreach (var item in _state.LimitReassessments.Values.ToArray())
+        {
+            if (replacementIds.Contains(item.IntentId))
+            {
+                states.Remove(item.IntentId);
+                changed = true;
+                continue;
+            }
+            if (item.Decision is null)
+                continue;
+
+            var order = _orders.Orders.SingleOrDefault(candidate => candidate.IntentId == item.IntentId);
+            if (order is null || order.ManagementMode == ManagedOrderManagementMode.Manual
+                || order.EntryTerminalState is ManagedEntryTerminalState.Cancelled or ManagedEntryTerminalState.Filled
+                    or ManagedEntryTerminalState.Rejected)
+            {
+                states.Remove(item.IntentId);
+                changed = true;
+                continue;
+            }
+
+            states[item.IntentId] = item with
+            {
+                EntryOrderId = order.EntryOrderId,
+                Phase = order.EntryOrderId is null
+                    ? LimitReassessmentPhase.WaitingForEntry : LimitReassessmentPhase.Scheduled,
+                AssessmentId = null,
+                Decision = null,
+                DecisionReceivedAt = null,
+                CancellationConfirmedAt = null,
+                NextReassessmentAt = _clock.UtcNow.AddMinutes(item.IntervalMinutes),
+                LastStatus = "Stop сбросил позднее решение; следующий ответ требует новой переоценки."
+            };
+            changed = true;
+        }
+
+        var pendingSetup = _state.PendingSetup;
+        if (pendingSetup is not null && (replacementRequestIds.Contains(pendingSetup.Request.Id)
+                                         || pendingSetup.ReplacesIntentId is { } replacesId
+                                         && replacementIds.Contains(replacesId)))
+        {
+            pendingSetup = null;
+            changed = true;
+        }
+        if (!changed)
+            return true;
+
+        if (!await _recovery.SaveTradingLoopStateAsync(_state with
+            {
+                LimitReassessments = states,
+                PendingSetup = pendingSetup,
+                LastStatus = "Stop сбросил ожидающие решения переоценки Limit."
+            }, cancellationToken).ConfigureAwait(false))
+        {
+            _admission.SetGlobalBlock(true);
+            return false;
+        }
+        _state = _recovery.TradingLoopState;
+        _lastStatus = _state.LastStatus;
+        return true;
     }
 
     private async Task<bool> SaveLoopStateAsync(TradingLoopState state, CancellationToken cancellationToken)

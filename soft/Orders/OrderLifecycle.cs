@@ -204,7 +204,8 @@ internal sealed record ManagedOrderIntent(
     decimal Quantity,
     decimal? LimitPrice,
     decimal TakeProfit,
-    decimal StopLoss);
+    decimal StopLoss,
+    string? IntentId = null);
 
 internal interface IManagedOrderTestAdapter : IRecoverySnapshotSource
 {
@@ -293,7 +294,10 @@ internal sealed class OrderLifecycleCoordinator
         if (!MatchesEligibility(intent, eligibilityInput.Setup, eligibility))
             return Blocked("Результат допуска 007 не подтверждает точный рынок и условия входа.");
 
-        var state = new ManagedOrderState(Guid.NewGuid().ToString("N"), intent.Venue, intent.Account,
+        if (intent.IntentId is not null && !Guid.TryParseExact(intent.IntentId, "N", out _))
+            return Blocked("Идентификатор подготовленного намерения имеет неверный формат.");
+
+        var state = new ManagedOrderState(intent.IntentId ?? Guid.NewGuid().ToString("N"), intent.Venue, intent.Account,
             intent.Asset, intent.Contract, intent.Direction, intent.EntryType, intent.Quantity, intent.LimitPrice,
             intent.TakeProfit, intent.StopLoss, eligibility.Status, eligibility.EvaluatedAt, now,
             RemainingQuantity: intent.Quantity);
@@ -345,7 +349,7 @@ internal sealed class OrderLifecycleCoordinator
                     EligibilityEvaluatedAt = actionEligibilityMatches
                         ? actionEligibility!.EvaluatedAt : state.EligibilityEvaluatedAt
                 };
-            }, entryAdmissionFence: entryAdmissionFence).ConfigureAwait(false);
+            }, transferAdmissionFence: entryAdmissionFence).ConfigureAwait(false);
         if (!result.Succeeded || result.State is null)
         {
             if (!actionEligibilityMatches)
@@ -372,16 +376,19 @@ internal sealed class OrderLifecycleCoordinator
     internal Task<OrderLifecycleResult> CancelRemainderAsync(
         string intentId,
         bool savedOperatingIntent,
-        CancellationToken cancellationToken = default) =>
+        CancellationToken cancellationToken = default,
+        Func<Func<bool>, bool>? transferAdmissionFence = null) =>
         ExecuteSeriallyAsync(cancellationToken,
-            () => CancelRemainderCoreAsync(intentId, savedOperatingIntent, cancellationToken));
+            () => CancelRemainderCoreAsync(intentId, savedOperatingIntent, cancellationToken,
+                transferAdmissionFence: transferAdmissionFence));
 
     internal Task<OrderLifecycleResult> RunDueChecksAsync(
         string intentId,
         bool savedOperatingIntent = false,
-        CancellationToken cancellationToken = default) =>
+        CancellationToken cancellationToken = default,
+        bool force = false) =>
         ExecuteSeriallyAsync(cancellationToken,
-            () => RunDueChecksCoreAsync(intentId, savedOperatingIntent, cancellationToken));
+            () => RunDueChecksCoreAsync(intentId, savedOperatingIntent, cancellationToken, force));
 
     internal Task<OrderLifecycleResult> ContinueWithOwnerParametersAsync(
         string intentId,
@@ -403,7 +410,8 @@ internal sealed class OrderLifecycleCoordinator
         string intentId,
         bool savedOperatingIntent,
         CancellationToken cancellationToken,
-        bool repairAfterCancel = true)
+        bool repairAfterCancel = true,
+        Func<Func<bool>, bool>? transferAdmissionFence = null)
     {
         var state = Find(intentId);
         if (state?.ManagementMode == ManagedOrderManagementMode.Manual)
@@ -414,7 +422,7 @@ internal sealed class OrderLifecycleCoordinator
             RecoveryActionKind.CancelOwnedOrder, "cancel", "CancelOpeningRemainder", savedOperatingIntent,
             before => TryFindOwnedOrder(state, before.Account!, out var order) && order?.RemainingQuantity > 0m,
             (_, operationId) => _adapter.CancelRemainderAsync(state, state.EntryOrderId!, operationId, cancellationToken),
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken, transferAdmissionFence: transferAdmissionFence).ConfigureAwait(false);
         if (!result.Succeeded || result.State is null)
             return new(false, result.Status, intentId);
 
@@ -480,7 +488,8 @@ internal sealed class OrderLifecycleCoordinator
     private async Task<OrderLifecycleResult> RunDueChecksCoreAsync(
         string intentId,
         bool savedOperatingIntent,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool force)
     {
         var state = Find(intentId);
         if (state is null)
@@ -502,7 +511,7 @@ internal sealed class OrderLifecycleCoordinator
         var partialWithoutDeadline = state.EntryTerminalState == ManagedEntryTerminalState.Open
             && state.FilledQuantity > 0m && state.FirstPartialFillAt is null;
         var cancelDue = state.PartialFillCancelAt is { } cancelAt && cancelAt <= _clock.UtcNow;
-        var checkDue = state.NextManagementCheckAt is null || state.NextManagementCheckAt <= _clock.UtcNow;
+        var checkDue = force || state.NextManagementCheckAt is null || state.NextManagementCheckAt <= _clock.UtcNow;
         if (!partialWithoutDeadline && !cancelDue && !checkDue)
             return new(false, "Проверка ещё не наступила.", intentId);
 
@@ -1219,7 +1228,7 @@ internal sealed class OrderLifecycleCoordinator
         Func<RecoverySnapshotRead, string, Task<RecoveryOperationOutcome>> send,
         CancellationToken cancellationToken,
         Func<RecoverySnapshotRead, ManagedOrderState>? refreshState = null,
-        Func<Func<bool>, bool>? entryAdmissionFence = null)
+        Func<Func<bool>, bool>? transferAdmissionFence = null)
     {
         if (!_recovery.IsActionAllowed(state.Venue, state.Account, savedOperatingIntent,
                 recoveryAction, state.Contract))
@@ -1302,7 +1311,7 @@ internal sealed class OrderLifecycleCoordinator
         try
         {
             transferStarted = await _recovery.BeginTransferAsync(operationId, savedOperatingIntent,
-                    cancellationToken, entryAdmissionFence)
+                    cancellationToken, transferAdmissionFence)
                 .ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

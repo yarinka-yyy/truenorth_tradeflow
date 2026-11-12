@@ -1,23 +1,43 @@
 using TrueNorth.TradeFlow;
+using TrueNorth.TradeFlow.Account;
 
 namespace TrueNorth.TradeFlow.Trading;
 
 internal sealed record TradingLoopPendingSetup(
     AiAnalysisRequest Request,
     AiSourceResponse Response,
-    DateTimeOffset? ReceivedAt);
+    DateTimeOffset? ReceivedAt,
+    int? LimitReassessmentMinutes = null,
+    TradingLoopPreparedEntry? PreparedEntry = null,
+    string? ReplacesIntentId = null);
+
+internal sealed record TradingLoopPreparedEntry(
+    string IntentId,
+    Guid RequestId,
+    string Venue,
+    string Account,
+    string Contract,
+    string Asset,
+    string EntryType,
+    PositionDirection Direction,
+    decimal Quantity,
+    decimal? LimitPrice,
+    decimal TakeProfit,
+    decimal StopLoss);
 
 internal sealed record TradingLoopState
 {
     public Dictionary<string, DateTimeOffset> NextSearchAt { get; init; } = new(StringComparer.Ordinal);
     public Dictionary<string, string> ActiveFailureIds { get; init; } = new(StringComparer.Ordinal);
+    public Dictionary<string, TradingLoopLimitReassessment> LimitReassessments { get; init; } = new(StringComparer.Ordinal);
     public TradingLoopPendingSetup? PendingSetup { get; init; }
     public string? LastStatus { get; init; }
 
     internal TradingLoopState Copy() => this with
     {
         NextSearchAt = new(NextSearchAt, StringComparer.Ordinal),
-        ActiveFailureIds = new(ActiveFailureIds, StringComparer.Ordinal)
+        ActiveFailureIds = new(ActiveFailureIds, StringComparer.Ordinal),
+        LimitReassessments = new(LimitReassessments, StringComparer.Ordinal)
     };
 }
 

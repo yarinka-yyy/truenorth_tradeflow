@@ -34,6 +34,9 @@ internal static class TradingLoopChecks
         await CheckSuccessfulEntryAndProtection(check, Path.Combine(root, "trading-loop-entry"));
         await CheckUnknownEntryIsNotRepeated(check, Path.Combine(root, "trading-loop-unknown"));
         await CheckTransferFence(check, Path.Combine(root, "trading-loop-fence"));
+        await CheckLimitReassessmentOutcomes(check, Path.Combine(root, "trading-loop-limit-outcomes"));
+        await CheckLimitReassessmentRaces(check, Path.Combine(root, "trading-loop-limit-races"));
+        await CheckLimitReassessmentRecovery(check, Path.Combine(root, "trading-loop-limit-recovery"));
     }
 
     private static async Task CheckNoSetupSurvivesRestart(Action<bool, string> check, string root)
@@ -553,6 +556,545 @@ internal static class TradingLoopChecks
         check(!result.Succeeded && harness.Adapter.SubmitCount == 0
               && harness.Recovery.State.Operations.Any(operation => operation.Stage == RecoveryOperationStage.Abandoned),
             "the final entry fence can reject after asynchronous order reads without calling the adapter");
+
+        using var cancelHarness = new Harness(Path.Combine(root, "cancel-begin-fence"), ["SOL"], entryType: "Limit");
+        var limit = await OpenLimitAsync(cancelHarness);
+        var fenceCalls = 0;
+        var cancel = await cancelHarness.Orders.CancelRemainderAsync(limit.IntentId, savedOperatingIntent: true,
+            CancellationToken.None, transferAdmissionFence: _ =>
+            {
+                fenceCalls++;
+                return false;
+            });
+        var cancelOperation = cancelHarness.Recovery.State.Operations.Last(operation =>
+            operation.ActionKind == RecoveryActionKind.CancelOwnedOrder);
+        var afterFence = cancelHarness.Orders.Orders.Single(item => item.IntentId == limit.IntentId);
+        check(!cancel.Succeeded && fenceCalls == 1 && cancelHarness.Adapter.CancelCount == 0
+              && afterFence.EntryTerminalState == ManagedEntryTerminalState.Open
+              && afterFence.PendingOperationId is null
+              && cancelOperation.Stage == RecoveryOperationStage.Abandoned,
+            "a refused final transfer fence abandons the prepared automatic cancel before its adapter call");
+    }
+
+    private static async Task CheckLimitReassessmentOutcomes(Action<bool, string> check, string root)
+    {
+        using (var keep = new Harness(Path.Combine(root, "keep"), ["SOL"], entryType: "Limit"))
+        {
+            var order = await OpenLimitAsync(keep);
+            var before = keep.Loop.State.LimitReassessments[order.IntentId];
+            keep.Clock.UtcNow = before.NextReassessmentAt;
+            keep.Ai.LimitHandler = context => Task.FromResult(LimitResult(context, LimitReassessmentOutcome.Keep));
+            var result = await keep.Loop.RunOnceAsync();
+            var after = keep.Loop.State.LimitReassessments[order.IntentId];
+            check(result.Succeeded && after.EntryOrderId == order.EntryOrderId
+                  && after.NextReassessmentAt == keep.Clock.UtcNow.AddMinutes(before.IntervalMinutes)
+                  && keep.Orders.Orders.Single(item => item.IntentId == order.IntentId).NextManagementCheckAt
+                      == keep.Clock.UtcNow.AddMinutes(keep.Profile.Settings.LimitOrderCheckMinutes)
+                  && keep.Adapter.CancelCount == 0 && keep.Adapter.SubmitCount == 1
+                  && keep.Ai.LimitReassessments.Single().EntryOrderId == order.EntryOrderId
+                  && keep.Ai.LimitReassessments.Single().Request.Id == before.Request.Id
+                  && keep.Ai.LimitReassessments.Single().OriginResponse == before.OriginResponse,
+                "Keep preserves the exact Limit and its independent 009 check while scheduling the next reassessment");
+        }
+
+        using (var invalid = new Harness(Path.Combine(root, "invalid"), ["SOL"], entryType: "Limit"))
+        {
+            var order = await OpenLimitAsync(invalid);
+            invalid.Clock.UtcNow = invalid.Loop.State.LimitReassessments[order.IntentId].NextReassessmentAt;
+            invalid.Ai.LimitHandler = context => Task.FromResult(LimitResult(context,
+                LimitReassessmentOutcome.InvalidNoReplacement, reason: "Синтетический сетап утратил актуальность."));
+            var result = await invalid.Loop.RunOnceAsync();
+            var savedOrder = invalid.Orders.Orders.Single(item => item.IntentId == order.IntentId);
+            var cancelIndex = invalid.Adapter.Trace.FindIndex(item => item == "cancel:" + order.EntryOrderId);
+            check(result.Succeeded && invalid.Adapter.CancelCount == 1 && invalid.Adapter.SubmitCount == 1
+                  && savedOrder.EntryTerminalState == ManagedEntryTerminalState.Cancelled
+                  && invalid.Loop.State.LimitReassessments.Count == 0
+                  && cancelIndex > 0
+                  && invalid.Adapter.Trace.Take(cancelIndex).Any(item => item.StartsWith("read:0:", StringComparison.Ordinal))
+                  && invalid.Adapter.Trace.Skip(cancelIndex + 1)
+                      .Any(item => item.StartsWith("read:1:", StringComparison.Ordinal)),
+                "InvalidNoReplacement cancels only the linked order between fresh pre- and post-action reads");
+        }
+
+        using (var replacement = new Harness(Path.Combine(root, "replacement"), ["SOL"], entryType: "Limit"))
+        {
+            var order = await OpenLimitAsync(replacement);
+            replacement.Clock.UtcNow = replacement.Loop.State.LimitReassessments[order.IntentId].NextReassessmentAt;
+            replacement.Ai.LimitHandler = context => Task.FromResult(LimitResult(context,
+                LimitReassessmentOutcome.Replacement,
+                ReplacementSetup(context.Request, replacement.Clock.UtcNow)));
+            var result = await replacement.Loop.RunOnceAsync();
+            var newOrder = replacement.Orders.Orders.SingleOrDefault(item => item.IntentId != order.IntentId
+                && ManagedOrderState.BlocksNewEntry(item));
+            var cancelIndex = replacement.Adapter.Trace.FindIndex(item => item == "cancel:" + order.EntryOrderId);
+            var entryIndex = replacement.Adapter.Trace.FindIndex(item => item.StartsWith("entry:", StringComparison.Ordinal)
+                && item != "entry:" + order.IntentId);
+            check(newOrder is not null && result.Succeeded && replacement.Adapter.CancelCount == 1
+                  && replacement.Adapter.SubmitCount == 2
+                  && newOrder.EntryType == "Limit" && newOrder.LimitPrice == 50m
+                  && newOrder.TakeProfit == 56m && newOrder.StopLoss == 45m
+                  && replacement.Orders.Orders.Single(item => item.IntentId == order.IntentId).EntryTerminalState
+                      == ManagedEntryTerminalState.Cancelled
+                  && replacement.Loop.State.LimitReassessments.ContainsKey(newOrder.IntentId)
+                  && replacement.Adapter.PreparedEntrySavedBeforeEntryTransfer
+                  && cancelIndex >= 0 && entryIndex > cancelIndex,
+                $"a complete replacement is sent after confirmed cancellation (status={result.Status}; submits={replacement.Adapter.SubmitCount}; cancel={replacement.Adapter.CancelCount}; loop={replacement.Loop.State.LastStatus})");
+        }
+
+        using (var unclear = new Harness(Path.Combine(root, "inconclusive"), ["SOL"], entryType: "Limit"))
+        {
+            var order = await OpenLimitAsync(unclear);
+            unclear.Clock.UtcNow = unclear.Loop.State.LimitReassessments[order.IntentId].NextReassessmentAt;
+            unclear.Ai.LimitHandler = context => Task.FromResult(LimitResult(context,
+                LimitReassessmentOutcome.Inconclusive, reason: "Синтетические данные не позволяют решить."));
+            var first = await unclear.Loop.RunOnceAsync();
+            var due = unclear.Loop.State.LimitReassessments[order.IntentId].NextReassessmentAt;
+            await unclear.Loop.RunOnceAsync();
+            check(!first.Succeeded && due == unclear.Clock.UtcNow.AddMinutes(240)
+                  && unclear.Loop.State.LimitReassessments[order.IntentId].EntryOrderId == order.EntryOrderId
+                  && unclear.Adapter.CancelCount == 0 && unclear.Adapter.SubmitCount == 1
+                  && unclear.Ai.LimitReassessments.Count == 1
+                  && unclear.Recovery.State.Events.Any(item => item.Type == RecoveryEventType.Error
+                      && item.NotificationSummary == "Переоценка Limit не завершена; исходная заявка сохранена."),
+                "Inconclusive keeps the exact order, records an 008 notification and does not confuse search NO_SETUP");
+        }
+
+        using (var independent = new Harness(Path.Combine(root, "independent-009-deadline"),
+                   ["SOL"], entryType: "Limit"))
+        {
+            await independent.Loop.StartAsync();
+            independent.Adapter.EntryFilledQuantity = 0m;
+            var routeA = independent.Contexts.Routes.Single();
+            var routeB = independent.AddAlternativeRoute("SOL", Harness.VenueB, Harness.AccountB,
+                "SOL-PERP", 1000m, 900m);
+            var solRequest = Request("SOL", "Limit");
+            var alternateRequest = Request("SOL", "Limit");
+            var solResponse = Setup(solRequest, independent.Clock.UtcNow);
+            var alternateResponse = Setup(alternateRequest, independent.Clock.UtcNow);
+            var solPrepared = await PrepareEntryAsync(independent, solRequest, solResponse,
+                selectedRoute: routeA);
+            var alternatePrepared = await PrepareEntryAsync(independent, alternateRequest, alternateResponse,
+                selectedRoute: routeB);
+            var sol = await OpenLimitDirectlyAsync(independent, solRequest, solResponse, solPrepared.IntentId,
+                selectedRoute: routeA);
+            var alternate = await OpenLimitDirectlyAsync(independent, alternateRequest, alternateResponse,
+                alternatePrepared.IntentId, selectedRoute: routeB);
+            var interval = independent.Profile.Settings.LimitReassessmentMinutes;
+            var states = new Dictionary<string, TradingLoopLimitReassessment>(StringComparer.Ordinal)
+            {
+                [sol.IntentId] = new TradingLoopLimitReassessment(sol.IntentId, sol.EntryOrderId,
+                    solRequest, solResponse, independent.Clock.UtcNow, interval,
+                    independent.Clock.UtcNow.AddMinutes(300), LimitReassessmentPhase.Scheduled),
+                [alternate.IntentId] = new TradingLoopLimitReassessment(alternate.IntentId,
+                    alternate.EntryOrderId, alternateRequest, alternateResponse, independent.Clock.UtcNow,
+                    interval, independent.Clock.UtcNow.AddMinutes(240), LimitReassessmentPhase.Scheduled)
+            };
+            if (!await independent.Recovery.SaveTradingLoopStateAsync(independent.Loop.State with
+                { LimitReassessments = states }))
+                throw new InvalidOperationException("Could not seed independent synthetic Limit deadlines.");
+            await independent.RestartAsync();
+            independent.Clock.UtcNow = independent.Clock.UtcNow.AddMinutes(240);
+            independent.Ai.LimitHandler = context => Task.FromResult(LimitResult(context,
+                LimitReassessmentOutcome.Inconclusive));
+            var independentResult = await independent.Loop.RunOnceAsync();
+            var monitoredSol = independent.Orders.Orders.Single(item => item.IntentId == sol.IntentId);
+            var monitoredAlternate = independent.Orders.Orders.Single(item => item.IntentId == alternate.IntentId);
+            check(monitoredSol.NextManagementCheckAt == independent.Clock.UtcNow.AddMinutes(
+                      independent.Profile.Settings.LimitOrderCheckMinutes)
+                  && monitoredAlternate.NextManagementCheckAt == independent.Clock.UtcNow.AddMinutes(
+                      independent.Profile.Settings.LimitOrderCheckMinutes)
+                  && independent.Ai.LimitReassessments.Count == 1
+                  && independent.Ai.LimitReassessments[0].IntentId == alternate.IntentId
+                  && ManagedOrderState.BlocksNewEntry(monitoredSol)
+                  && ManagedOrderState.BlocksNewEntry(monitoredAlternate),
+                $"a future reassessment does not defer another Limit's due 009 and reassessment deadlines "
+                + $"(sol={monitoredSol.NextManagementCheckAt:O}; alt={monitoredAlternate.NextManagementCheckAt:O}; "
+                + $"expected={independent.Clock.UtcNow.AddMinutes(independent.Profile.Settings.LimitOrderCheckMinutes):O}; "
+                + $"ai={independent.Ai.LimitReassessments.Count}; "
+                + $"aiIntent={independent.Ai.LimitReassessments.FirstOrDefault()?.IntentId}; "
+                + $"solId={sol.IntentId}; altId={alternate.IntentId}; status={independentResult.Status})");
+        }
+    }
+
+    private static async Task CheckLimitReassessmentRaces(Action<bool, string> check, string root)
+    {
+        using (var stopped = new Harness(Path.Combine(root, "stop"), ["SOL"], entryType: "Limit"))
+        {
+            var order = await OpenLimitAsync(stopped);
+            stopped.Clock.UtcNow = stopped.Loop.State.LimitReassessments[order.IntentId].NextReassessmentAt;
+            stopped.Ai.BlockNextLimitResponse();
+            var run = stopped.Loop.RunOnceAsync();
+            var context = await stopped.Ai.LimitReassessmentStarted.Task;
+            var stop = stopped.Loop.StopAsync();
+            while (stopped.Loop.IsAdmitting)
+                await Task.Yield();
+            stopped.Ai.ReleaseBlockedLimitResponse(LimitResult(context, LimitReassessmentOutcome.Replacement,
+                ReplacementSetup(context.Request, stopped.Clock.UtcNow)));
+            var outcomes = await Task.WhenAll(run, stop);
+            var stoppedOrder = stopped.Orders.Orders.Single(item => item.IntentId == order.IntentId);
+            check(stopped.Adapter.SubmitCount == 1 && stopped.Adapter.CancelCount == 1
+                  && stoppedOrder.EntryTerminalState == ManagedEntryTerminalState.Cancelled
+                  && stopped.Loop.State.LimitReassessments.Values.All(item => item.Decision is null),
+                $"Stop during AI invalidates the late replacement (run={outcomes[0].Status}; stop={outcomes[1].Status}; order={stoppedOrder.EntryTerminalState}; limitStates={stopped.Loop.State.LimitReassessments.Count})");
+        }
+
+        using (var transferred = new Harness(Path.Combine(root, "manual-transfer"), ["SOL"], entryType: "Limit"))
+        {
+            var order = await OpenLimitAsync(transferred);
+            transferred.Clock.UtcNow = transferred.Loop.State.LimitReassessments[order.IntentId].NextReassessmentAt;
+            transferred.Ai.BlockNextLimitResponse();
+            var run = transferred.Loop.RunOnceAsync();
+            var context = await transferred.Ai.LimitReassessmentStarted.Task;
+            var transfer = await transferred.Orders.TransferToManualAsync(order.IntentId);
+            transferred.Ai.ReleaseBlockedLimitResponse(LimitResult(context, LimitReassessmentOutcome.Replacement,
+                ReplacementSetup(context.Request, transferred.Clock.UtcNow)));
+            await run;
+            check(transfer.Succeeded && transferred.Adapter.CancelCount == 0 && transferred.Adapter.SubmitCount == 1
+                  && transferred.Orders.Orders.Single(item => item.IntentId == order.IntentId).ManagementMode
+                      == ManagedOrderManagementMode.Manual
+                  && transferred.Loop.State.LimitReassessments.Count == 0,
+                "manual transfer during AI invalidates the late result and prevents automated order changes");
+        }
+
+        foreach (var fillQuantity in new decimal?[] { 0.5m, null })
+        {
+            using var filled = new Harness(Path.Combine(root, fillQuantity is null ? "full-fill" : "partial-fill"),
+                ["SOL"], entryType: "Limit");
+            var order = await OpenLimitAsync(filled);
+            filled.Clock.UtcNow = filled.Loop.State.LimitReassessments[order.IntentId].NextReassessmentAt;
+            filled.Adapter.FillDuringCancel = fillQuantity ?? order.Quantity;
+            filled.Ai.LimitHandler = context => Task.FromResult(LimitResult(context,
+                LimitReassessmentOutcome.Replacement,
+                ReplacementSetup(context.Request, filled.Clock.UtcNow)));
+            await filled.Loop.RunOnceAsync();
+            var after = filled.Orders.Orders.Single(item => item.IntentId == order.IntentId);
+            var expectedFill = fillQuantity ?? order.Quantity;
+            check(filled.Adapter.CancelCount == 1 && filled.Adapter.SubmitCount == 1
+                  && after.FilledQuantity == expectedFill && after.PositionQuantity == expectedFill
+                  && after.Status == ManagedOrderStatus.Protected
+                  && after.TakeProfitCoveredQuantity == expectedFill && after.StopLossCoveredQuantity == expectedFill
+                  && filled.Loop.State.LimitReassessments.Count == 0,
+                $"{(fillQuantity is null ? "full" : "partial")} fill during cancel stays under TP/SL protection and blocks replacement");
+        }
+    }
+
+    private static async Task CheckLimitReassessmentRecovery(Action<bool, string> check, string root)
+    {
+        using (var linked = new Harness(Path.Combine(root, "before-order-result"), ["SOL"], entryType: "Limit"))
+        {
+            await linked.Loop.StartAsync();
+            var request = Request("SOL", "Limit");
+            var response = Setup(request, linked.Clock.UtcNow);
+            var prepared = await PrepareEntryAsync(linked, request, response);
+            var pending = new TradingLoopPendingSetup(request, response, linked.Clock.UtcNow,
+                linked.Profile.Settings.LimitReassessmentMinutes, prepared);
+            if (!await linked.Recovery.SaveTradingLoopStateAsync(linked.Loop.State with { PendingSetup = pending }))
+                throw new InvalidOperationException("Could not seed the original limit response.");
+            linked.Adapter.EntryFilledQuantity = 0m;
+            var order = await OpenLimitDirectlyAsync(linked, request, response, prepared.IntentId);
+            await linked.RestartAsync();
+            await linked.Loop.StartAsync();
+            await linked.Loop.RunOnceAsync();
+            check(linked.Adapter.SubmitCount == 1 && linked.Loop.State.PendingSetup is null
+                  && order.IntentId == prepared.IntentId
+                  && linked.Loop.State.LimitReassessments[order.IntentId].EntryOrderId == order.EntryOrderId
+                  && linked.Loop.State.LimitReassessments[order.IntentId].Request.Id == request.Id
+                  && linked.Ai.LimitReassessments.Count == 0,
+                "restart links the persisted source response to the exact order when the loop missed its result");
+        }
+
+        using (var foreign = new Harness(Path.Combine(root, "no-adopt-foreign-order"), ["SOL"],
+                   entryType: "Limit"))
+        {
+            await foreign.Loop.StartAsync();
+            var request = Request("SOL", "Limit");
+            var response = Setup(request, foreign.Clock.UtcNow);
+            foreign.Adapter.EntryFilledQuantity = 0m;
+            var actual = await PrepareEntryAsync(foreign, request, response);
+            var order = await OpenLimitDirectlyAsync(foreign, request, response, actual.IntentId);
+            var expected = actual with { IntentId = Guid.NewGuid().ToString("N") };
+            var pending = new TradingLoopPendingSetup(request, response, foreign.Clock.UtcNow,
+                foreign.Profile.Settings.LimitReassessmentMinutes, expected);
+            if (!await foreign.Recovery.SaveTradingLoopStateAsync(foreign.Loop.State with { PendingSetup = pending }))
+                throw new InvalidOperationException("Could not seed the unmatched exact-intent fixture.");
+            await foreign.RestartAsync();
+            await foreign.Loop.RunOnceAsync();
+            var retained = foreign.Orders.Orders.Single(item => item.IntentId == order.IntentId);
+            check(foreign.Adapter.SubmitCount == 1 && foreign.Adapter.CancelCount == 0
+                  && retained.EntryTerminalState == ManagedEntryTerminalState.Open
+                  && retained.PendingOperationId is null
+                  && foreign.Loop.State.PendingSetup?.PreparedEntry?.IntentId == expected.IntentId
+                  && !foreign.Loop.State.LimitReassessments.ContainsKey(order.IntentId),
+                $"a matching legacy order with another IntentId is not adopted or mutated during restart "
+                + $"(submits={foreign.Adapter.SubmitCount}; cancels={foreign.Adapter.CancelCount}; "
+                + $"entry={retained.EntryTerminalState}; pending={retained.PendingOperationId}; "
+                + $"saved={foreign.Loop.State.PendingSetup?.PreparedEntry?.IntentId}; expected={expected.IntentId}; "
+                + $"reassessment={foreign.Loop.State.LimitReassessments.ContainsKey(order.IntentId)}; "
+                + $"status={foreign.Loop.State.LastStatus})");
+        }
+
+        using (var beforeCancel = new Harness(Path.Combine(root, "before-cancel"), ["SOL"], entryType: "Limit"))
+        {
+            var order = await OpenLimitAsync(beforeCancel);
+            beforeCancel.Clock.UtcNow = beforeCancel.Loop.State.LimitReassessments[order.IntentId].NextReassessmentAt;
+            await SeedReplacementDecisionAsync(beforeCancel, order, LimitReassessmentPhase.CancelPending);
+            await beforeCancel.RestartAsync();
+            await beforeCancel.Loop.StartAsync();
+            await beforeCancel.Loop.RunOnceAsync();
+            check(beforeCancel.Adapter.CancelCount == 1 && beforeCancel.Adapter.SubmitCount == 2
+                  && beforeCancel.Ai.LimitReassessments.Count == 0
+                  && beforeCancel.Orders.Orders.Any(item => item.IntentId != order.IntentId
+                      && item.EntryType == "Limit" && ManagedOrderState.BlocksNewEntry(item)),
+                "restart before cancellation resumes the stored decision once, then sends the replacement through A");
+        }
+
+        using (var afterCancel = new Harness(Path.Combine(root, "after-cancel"), ["SOL"], entryType: "Limit"))
+        {
+            var order = await OpenLimitAsync(afterCancel);
+            afterCancel.Clock.UtcNow = afterCancel.Loop.State.LimitReassessments[order.IntentId].NextReassessmentAt;
+            var waiting = await SeedReplacementDecisionAsync(afterCancel, order,
+                LimitReassessmentPhase.CancelPending);
+            var cancelled = await afterCancel.Orders.CancelRemainderAsync(order.IntentId, true);
+            if (!cancelled.Succeeded)
+                throw new InvalidOperationException("Could not seed the confirmed cancellation boundary.");
+            var prepared = await SaveReplacementPendingEntryAsync(afterCancel, waiting, order.IntentId);
+            await afterCancel.RestartAsync();
+            await afterCancel.Loop.StartAsync();
+            await afterCancel.Loop.RunOnceAsync();
+            check(afterCancel.Adapter.CancelCount == 1 && afterCancel.Adapter.SubmitCount == 2
+                  && afterCancel.Loop.State.LimitReassessments.Count == 1
+                  && afterCancel.Loop.State.LimitReassessments.ContainsKey(prepared.IntentId)
+                  && afterCancel.Loop.State.LimitReassessments.Values.Single().IntentId != order.IntentId,
+                "restart after confirmed cancellation resumes replacement without a second cancel");
+        }
+
+        using (var beforeReceived = new Harness(Path.Combine(root, "after-replacement-transfer"), ["SOL"],
+                   entryType: "Limit"))
+        {
+            var order = await OpenLimitAsync(beforeReceived);
+            beforeReceived.Clock.UtcNow = beforeReceived.Loop.State.LimitReassessments[order.IntentId].NextReassessmentAt;
+            var waiting = await SeedReplacementDecisionAsync(beforeReceived, order,
+                LimitReassessmentPhase.CancelPending);
+            var cancelled = await beforeReceived.Orders.CancelRemainderAsync(order.IntentId, true);
+            if (!cancelled.Succeeded)
+                throw new InvalidOperationException("Could not seed the confirmed cancellation boundary.");
+            var prepared = await SaveReplacementPendingEntryAsync(beforeReceived, waiting, order.IntentId);
+            var reassessment = beforeReceived.Loop.State.LimitReassessments[order.IntentId];
+            var replacementResponse = reassessment.Decision!.ReplacementResponse!;
+            await OpenLimitDirectlyAsync(beforeReceived, reassessment.Request, replacementResponse,
+                prepared.IntentId);
+            var submitted = beforeReceived.Adapter.SubmitCount;
+            await beforeReceived.RestartAsync();
+            await beforeReceived.Loop.StartAsync();
+            await beforeReceived.Loop.RunOnceAsync();
+            check(beforeReceived.Adapter.CancelCount == 1 && beforeReceived.Adapter.SubmitCount == submitted
+                  && beforeReceived.Loop.State.LimitReassessments.Count == 1
+                  && beforeReceived.Loop.State.LimitReassessments.ContainsKey(prepared.IntentId)
+                  && beforeReceived.Loop.State.LimitReassessments.Values.Single().IntentId != order.IntentId,
+                "restart after replacement transfer links the new order instead of repeating cancel or entry");
+        }
+
+        using (var rejected = new Harness(Path.Combine(root, "rejected-cancel"), ["SOL"], entryType: "Limit"))
+        {
+            var order = await OpenLimitAsync(rejected);
+            rejected.Clock.UtcNow = rejected.Loop.State.LimitReassessments[order.IntentId].NextReassessmentAt;
+            rejected.Adapter.CancelOutcome = RecoveryOperationOutcome.NotExecuted;
+            rejected.Ai.LimitHandler = context => Task.FromResult(LimitResult(context,
+                LimitReassessmentOutcome.Replacement,
+                ReplacementSetup(context.Request, rejected.Clock.UtcNow)));
+            await rejected.Loop.RunOnceAsync();
+            var next = rejected.Loop.State.LimitReassessments[order.IntentId].NextReassessmentAt;
+            await rejected.RestartAsync();
+            await rejected.Loop.StartAsync();
+            await rejected.Loop.RunOnceAsync();
+            check(rejected.Adapter.CancelCount == 1 && rejected.Adapter.SubmitCount == 1
+                  && rejected.Ai.LimitReassessments.Count == 1 && next > rejected.Clock.UtcNow
+                  && rejected.Orders.Orders.Single(item => item.IntentId == order.IntentId)
+                      .EntryTerminalState == ManagedEntryTerminalState.Open,
+                "a rejected cancel keeps the exact remainder and does not repeat cancellation after restart");
+        }
+
+        using (var unknown = new Harness(Path.Combine(root, "unknown-cancel"), ["SOL"], entryType: "Limit"))
+        {
+            var order = await OpenLimitAsync(unknown);
+            unknown.Clock.UtcNow = unknown.Loop.State.LimitReassessments[order.IntentId].NextReassessmentAt;
+            unknown.Adapter.CancelOutcome = RecoveryOperationOutcome.Unknown;
+            unknown.Ai.LimitHandler = context => Task.FromResult(LimitResult(context,
+                LimitReassessmentOutcome.InvalidNoReplacement));
+            await unknown.Loop.RunOnceAsync();
+            await unknown.RestartAsync();
+            await unknown.Loop.StartAsync();
+            await unknown.Loop.RunOnceAsync();
+            check(unknown.Adapter.CancelCount == 1 && unknown.Adapter.SubmitCount == 1
+                  && unknown.Orders.Orders.Single(item => item.IntentId == order.IntentId).PendingOperationId is not null
+                  && unknown.Loop.State.LimitReassessments[order.IntentId].Phase
+                      == LimitReassessmentPhase.CancelPending,
+                "unknown cancellation remains pending reconciliation and is never sent twice after restart");
+        }
+    }
+
+    private static async Task<ManagedOrderState> OpenLimitAsync(Harness harness)
+    {
+        harness.Adapter.EntryFilledQuantity = 0m;
+        harness.Ai.Handler = request => Task.FromResult(Setup(request, harness.Clock.UtcNow));
+        if (!(await harness.Loop.StartAsync()).Succeeded)
+            throw new InvalidOperationException("Could not start the synthetic Limit scenario.");
+        var result = await harness.Loop.RunOnceAsync();
+        if (!result.Succeeded)
+            throw new InvalidOperationException(result.Status);
+        return harness.Orders.Orders.Single(order => order.EntryType == "Limit");
+    }
+
+    private static LimitReassessmentResult LimitResult(
+        LimitReassessmentContext context,
+        LimitReassessmentOutcome outcome,
+        AiSourceResponse? replacement = null,
+        string? reason = null) => new(context.AssessmentId, context.IntentId, context.EntryOrderId,
+        context.Request.Id, outcome, replacement, reason);
+
+    private static AiSourceResponse ReplacementSetup(AiAnalysisRequest request, DateTimeOffset now) =>
+        new(request.Id, JsonSerializer.Serialize(new
+        {
+            status = "SETUP",
+            market = request.Market,
+            order_type = request.OrderType,
+            side = "LONG",
+            reference_price = 50m,
+            reference_time_utc = now.AddSeconds(-10).ToString("O", CultureInfo.InvariantCulture),
+            entry_price = 50m,
+            take_profit = 56m,
+            stop_loss = 45m,
+            reason = "синтетический новый сетап",
+            invalidation = "синтетическое условие"
+        }), true);
+
+    private static async Task<TradingLoopPreparedEntry> PrepareEntryAsync(
+        Harness harness,
+        AiAnalysisRequest request,
+        AiSourceResponse response,
+        string? intentId = null,
+        TradingLoopRoute? selectedRoute = null)
+    {
+        var assessed = AiResponseAssessor.Assess(request, response);
+        var fields = assessed.Fields ?? throw new InvalidOperationException("Synthetic setup did not parse.");
+        var observedAt = DateTimeOffset.Parse(fields.ReferenceTimeUtc!, CultureInfo.InvariantCulture,
+            DateTimeStyles.RoundtripKind);
+        var setup = new EntryEligibilitySetup(EntrySetupState.Complete, request.Asset, request.Market,
+            request.EntryType,
+            fields.EntryPrice, fields.Side == "LONG" ? PositionDirection.Long : PositionDirection.Short,
+            fields.TakeProfit, fields.StopLoss, "USDC/" + request.Asset, "local fixture", observedAt);
+        var routes = harness.Contexts.GetRoutes(harness.Profile);
+        var route = selectedRoute ?? routes.Single(item => item.Asset == request.Asset);
+        var account = (await harness.Recovery.ReadCurrentSnapshotAsync(route.Venue, route.Account)).Account!;
+        var profile = harness.Profile.Copy();
+        profile.SavedOperatingIntent = true;
+        profile.Settings.EntryType = request.EntryType;
+        var context = await harness.Contexts.ReadAsync(route, [account], setup, profile, harness.Clock.UtcNow,
+            CancellationToken.None);
+        var input = context.EligibilityInput! with { EvaluatedAt = harness.Clock.UtcNow };
+        var eligibility = EntryEligibilityEvaluator.Evaluate(input);
+            var pool = eligibility.SelectedPool ?? throw new InvalidOperationException(
+                $"Synthetic entry was not eligible ({eligibility.Status}: {string.Join(' ', eligibility.Reasons)}).");
+        return new TradingLoopPreparedEntry(intentId ?? Guid.NewGuid().ToString("N"), request.Id,
+            route.Venue, route.Account, route.Contract, request.Asset, request.EntryType,
+            setup.Direction!.Value, pool.Quantity!.Value, setup.LimitPrice,
+            setup.TakeProfit!.Value, setup.StopLoss!.Value);
+    }
+
+    private static async Task<ManagedOrderState> OpenLimitDirectlyAsync(
+        Harness harness,
+        AiAnalysisRequest request,
+        AiSourceResponse response,
+        string? intentId = null,
+        TradingLoopRoute? selectedRoute = null)
+    {
+        var prepared = await PrepareEntryAsync(harness, request, response, intentId, selectedRoute);
+        var account = (await harness.Recovery.ReadCurrentSnapshotAsync(prepared.Venue, prepared.Account))
+            .Account ?? throw new InvalidOperationException("Synthetic account was unavailable.");
+        var profile = harness.Profile.Copy();
+        profile.SavedOperatingIntent = true;
+        profile.Settings.EntryType = request.EntryType;
+        var assessed = AiResponseAssessor.Assess(request, response);
+        var fields = assessed.Fields ?? throw new InvalidOperationException("Synthetic setup did not parse.");
+        var observedAt = DateTimeOffset.Parse(fields.ReferenceTimeUtc!, CultureInfo.InvariantCulture,
+            DateTimeStyles.RoundtripKind);
+        var setup = new EntryEligibilitySetup(EntrySetupState.Complete, request.Asset, request.Market,
+            request.EntryType, fields.EntryPrice, prepared.Direction, prepared.TakeProfit, prepared.StopLoss,
+            "USDC/" + request.Asset, "local fixture", observedAt);
+        var route = new TradingLoopRoute(prepared.Asset, prepared.Venue, prepared.Account, prepared.Contract);
+        var context = await harness.Contexts.ReadAsync(route, [account], setup, profile, harness.Clock.UtcNow,
+            CancellationToken.None);
+        var input = context.EligibilityInput! with { EvaluatedAt = harness.Clock.UtcNow };
+        var intent = new ManagedOrderIntent(prepared.Venue, prepared.Account, prepared.Asset, prepared.Contract,
+            prepared.Direction, prepared.EntryType, prepared.Quantity, prepared.LimitPrice,
+            prepared.TakeProfit, prepared.StopLoss, prepared.IntentId);
+        var opened = await harness.Orders.OpenAsync(intent, input, savedOperatingIntent: true,
+            cancellationToken: CancellationToken.None);
+        if (!opened.Succeeded || opened.IntentId is null)
+            throw new InvalidOperationException(opened.Status);
+        return harness.Orders.Orders.Single(order => order.IntentId == opened.IntentId);
+    }
+
+    private static async Task<TradingLoopLimitReassessment> SeedReplacementDecisionAsync(
+        Harness harness,
+        ManagedOrderState order,
+        LimitReassessmentPhase phase)
+    {
+        var current = harness.Loop.State.LimitReassessments[order.IntentId];
+        var assessmentId = Guid.NewGuid();
+        var result = new LimitReassessmentResult(assessmentId, order.IntentId, order.EntryOrderId!,
+            current.Request.Id, LimitReassessmentOutcome.Replacement,
+            ReplacementSetup(current.Request, harness.Clock.UtcNow));
+        var decision = current with
+        {
+            Phase = phase,
+            AssessmentId = assessmentId,
+            Decision = result,
+            DecisionReceivedAt = harness.Clock.UtcNow,
+            CancellationConfirmedAt = phase == LimitReassessmentPhase.ReplacementPendingEntry
+                ? harness.Clock.UtcNow : null,
+            ReplacementIntervalMinutes = phase == LimitReassessmentPhase.ReplacementPendingEntry
+                ? harness.Profile.Settings.LimitReassessmentMinutes : null
+        };
+        var states = new Dictionary<string, TradingLoopLimitReassessment>(harness.Loop.State.LimitReassessments,
+            StringComparer.Ordinal)
+        {
+            [order.IntentId] = decision
+        };
+        if (!await harness.Recovery.SaveTradingLoopStateAsync(harness.Loop.State with
+            { LimitReassessments = states }))
+            throw new InvalidOperationException("Could not seed the saved replacement decision.");
+        return decision;
+    }
+
+    private static async Task<TradingLoopPreparedEntry> SaveReplacementPendingEntryAsync(
+        Harness harness,
+        TradingLoopLimitReassessment decision,
+        string intentId)
+    {
+        var response = decision.Decision?.ReplacementResponse
+            ?? throw new InvalidOperationException("A replacement response is required for the fixture.");
+        var prepared = await PrepareEntryAsync(harness, decision.Request, response);
+        var states = new Dictionary<string, TradingLoopLimitReassessment>(harness.Loop.State.LimitReassessments,
+            StringComparer.Ordinal)
+        {
+            [intentId] = decision with
+            {
+                Phase = LimitReassessmentPhase.ReplacementPendingEntry,
+                CancellationConfirmedAt = harness.Clock.UtcNow,
+                ReplacementIntervalMinutes = harness.Profile.Settings.LimitReassessmentMinutes,
+                ReplacementIntent = prepared
+            }
+        };
+        if (!await harness.Recovery.SaveTradingLoopStateAsync(harness.Loop.State with
+            {
+                LimitReassessments = states,
+                PendingSetup = new TradingLoopPendingSetup(decision.Request, response,
+                    decision.DecisionReceivedAt ?? harness.Clock.UtcNow,
+                    harness.Profile.Settings.LimitReassessmentMinutes, prepared, intentId)
+            }))
+            throw new InvalidOperationException("Could not seed the confirmed replacement boundary.");
+        return prepared;
     }
 
     private static AiAnalysisRequest Request(string asset, string orderType)
@@ -711,15 +1253,23 @@ internal static class TradingLoopChecks
         public DateTimeOffset UtcNow { get; set; } = now;
     }
 
-    private sealed class FixtureAi(FakeClock clock) : IAiAnalysisSource, ITradingLoopReassessmentSource
+    private sealed class FixtureAi(FakeClock clock) : IAiAnalysisSource, ITradingLoopReassessmentSource,
+        ITradingLoopLimitReassessmentSource
     {
         private TaskCompletionSource<AiAnalysisRequest>? _started;
         private TaskCompletionSource<AiSourceResponse>? _release;
+        private TaskCompletionSource<LimitReassessmentContext>? _limitStarted;
+        private TaskCompletionSource<LimitReassessmentResult>? _limitRelease;
         internal readonly List<AiAnalysisRequest> Requests = [];
         internal readonly List<TradingLoopReassessmentContext> Reassessments = [];
+        internal readonly List<LimitReassessmentContext> LimitReassessments = [];
         internal Func<AiAnalysisRequest, Task<AiSourceResponse>> Handler = request => Task.FromResult(NoSetup(request));
+        internal Func<LimitReassessmentContext, Task<LimitReassessmentResult>> LimitHandler = context =>
+            Task.FromResult(LimitResult(context, LimitReassessmentOutcome.Inconclusive));
         internal TaskCompletionSource<AiAnalysisRequest> RequestStarted => _started
             ?? throw new InvalidOperationException("No blocked AI request was started.");
+        internal TaskCompletionSource<LimitReassessmentContext> LimitReassessmentStarted => _limitStarted
+            ?? throw new InvalidOperationException("No limit reassessment is blocked.");
 
         internal void BlockNextResponse()
         {
@@ -732,6 +1282,15 @@ internal static class TradingLoopChecks
             var request = _started?.Task.Result ?? throw new InvalidOperationException("No AI request is blocked.");
             _release!.TrySetResult(Setup(request, clock.UtcNow));
         }
+
+        internal void BlockNextLimitResponse()
+        {
+            _limitStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            _limitRelease = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+
+        internal void ReleaseBlockedLimitResponse(LimitReassessmentResult result) =>
+            _limitRelease?.TrySetResult(result);
 
         public Task<AiSourceResponse> AnalyzeAsync(AiAnalysisRequest request, CancellationToken cancellationToken)
         {
@@ -752,6 +1311,19 @@ internal static class TradingLoopChecks
             Reassessments.Add(context);
             Requests.Add(context.Request);
             return Handler(context.Request);
+        }
+
+        public Task<LimitReassessmentResult> ReassessLimitAsync(
+            LimitReassessmentContext context,
+            CancellationToken cancellationToken)
+        {
+            LimitReassessments.Add(context);
+            if (_limitRelease is not null)
+            {
+                _limitStarted!.TrySetResult(context);
+                return _limitRelease.Task;
+            }
+            return LimitHandler(context);
         }
     }
 
@@ -802,14 +1374,26 @@ internal static class TradingLoopChecks
                 pools.Add(template with
                 {
                     Account = account,
+                    Instruments = template.Instruments.Select(instrument => instrument with
+                    {
+                        Identity = instrument.Identity with { ObservedAt = now.AddSeconds(-5) },
+                        RulesObservedAt = now.AddSeconds(-5),
+                        Funding = instrument.Funding is { } funding
+                            ? funding with { ObservedAt = now.AddSeconds(-5) } : null
+                    }).ToArray(),
                     Positions = [],
                     Orders = [],
                     SetupBinding = new RiskSetupMarketBinding(account.Venue, contract, setup.Asset,
                         setup.Market, "local fixture", now.AddSeconds(-2)),
                     CurrentMarketPrice = setup.EntryType == "Market"
-                        ? EntryEligibilityExample.Evidence(50m, "USDC/SOL", marketAt, contract) : null,
+                        ? EntryEligibilityExample.Evidence(50m, "USDC/" + setup.Asset, marketAt, contract) : null,
                     VerifiedLimitPrice = setup.EntryType == "Limit"
-                        ? EntryEligibilityExample.Evidence(setup.LimitPrice!.Value, "USDC/SOL", marketAt, contract) : null
+                        ? EntryEligibilityExample.Evidence(setup.LimitPrice!.Value, "USDC/" + setup.Asset,
+                            marketAt, contract) : null,
+                    CandidateStopCoveredBaseQuantity = Refresh(template.CandidateStopCoveredBaseQuantity, now),
+                    AvailableMarginIncludesOrderReserves = Refresh(template.AvailableMarginIncludesOrderReserves, now),
+                    OtherUnreservedRequirements = Refresh(template.OtherUnreservedRequirements, now),
+                    AdditionalMaintenanceHeadroom = Refresh(template.AdditionalMaintenanceHeadroom, now)
                 });
             }
 
@@ -826,6 +1410,9 @@ internal static class TradingLoopChecks
             return Task.FromResult(new TradingLoopContext(available, ExposureCovered, input,
                 available ? null : "Синтетический маршрут недоступен.", MinimumEntryAffordable));
         }
+
+        private static RiskEvidence<T>? Refresh<T>(RiskEvidence<T>? evidence, DateTimeOffset now) =>
+            evidence is null ? null : evidence with { ObservedAt = now };
     }
 
     private sealed class FixtureAdapter(FakeClock clock) : IManagedOrderTestAdapter
@@ -834,11 +1421,15 @@ internal static class TradingLoopChecks
         private readonly Dictionary<string, RecoveryOperationObservation> _observations = new(StringComparer.Ordinal);
         private RecoveryJournalStore? _store;
         internal RecoveryOperationOutcome EntryOutcome { get; set; } = RecoveryOperationOutcome.Confirmed;
+        internal RecoveryOperationOutcome CancelOutcome { get; set; } = RecoveryOperationOutcome.Confirmed;
         internal int SubmitCount { get; private set; }
         internal int CancelCount { get; private set; }
         internal bool DurableTransferSeenBeforeEveryCallback { get; private set; } = true;
+        internal bool PreparedEntrySavedBeforeEntryTransfer { get; private set; } = true;
         internal Exception? ReadFailure { get; set; }
         internal decimal? EntryFilledQuantity { get; set; }
+        internal decimal? FillDuringCancel { get; set; }
+        internal List<string> Trace { get; } = [];
         public TimeSpan MaximumSnapshotAge => TimeSpan.FromMinutes(5);
 
         internal void AddAccount(
@@ -872,6 +1463,7 @@ internal static class TradingLoopChecks
             if (ReadFailure is not null)
                 throw ReadFailure;
             var fixture = _accounts[(venue, account)];
+            Trace.Add($"read:{CancelCount}:{fixture.Orders.Count}:{fixture.Protections.Count}");
             var now = clock.UtcNow;
             var snapshot = new AccountSnapshot(venue, account, "USDC cross A", now, "local fixture", "USDC",
                 "contract", AccountReadState.Available, null, now,
@@ -896,15 +1488,16 @@ internal static class TradingLoopChecks
             cancellationToken.ThrowIfCancellationRequested();
             DurableBeforeCallback(operationId);
             SubmitCount++;
+            Trace.Add("entry:" + intent.IntentId);
             if (EntryOutcome != RecoveryOperationOutcome.Confirmed)
                 return Task.FromResult(EntryOutcome);
 
             var fixture = _accounts[(intent.Venue, intent.Account)];
             var orderId = "entry-" + intent.IntentId;
             var positionId = "position-" + intent.IntentId;
-            fixture.Positions.Clear();
-            fixture.Orders.Clear();
-            fixture.Protections.Clear();
+            fixture.Positions.RemoveAll(position => position.Contract == intent.Contract);
+            fixture.Orders.RemoveAll(order => order.Contract == intent.Contract);
+            fixture.Protections.RemoveAll(protection => protection.Contract == intent.Contract);
             var filled = EntryFilledQuantity ?? intent.Quantity;
             var remaining = intent.Quantity - filled;
             var confirmedPositionId = filled > 0m ? positionId : null;
@@ -933,12 +1526,39 @@ internal static class TradingLoopChecks
             DurableBeforeCallback(operationId);
             CancelCount++;
             var fixture = _accounts[(intent.Venue, intent.Account)];
-            fixture.Orders.RemoveAll(order => order.OrderId == orderId);
+            Trace.Add("cancel:" + orderId);
+            var current = fixture.Orders.Single(item => item.OrderId == orderId);
+            var filled = current.FilledQuantity;
+            if (FillDuringCancel is { } extraFill && extraFill > 0m)
+            {
+                filled = Math.Min(intent.Quantity, filled + extraFill);
+                fixture.Orders.RemoveAll(item => item.OrderId == orderId);
+                var remainder = intent.Quantity - filled;
+                if (remainder > 0m)
+                    fixture.Orders.Add(current with { FilledQuantity = filled });
+                var positionId = "position-" + intent.IntentId;
+                fixture.Positions.RemoveAll(item => item.PositionId == positionId);
+                fixture.Positions.Add(new OpenPosition(intent.Asset, intent.Contract, intent.Direction, filled,
+                    "contract", new MoneyAmount(0m, "USDC"), PositionOwnership.SoftwareOwned, "local fixture",
+                    positionId, [orderId]));
+            }
+
+            var remaining = intent.Quantity - filled;
+            if (CancelOutcome == RecoveryOperationOutcome.Unknown)
+                return Task.FromResult(RecoveryOperationOutcome.Unknown);
+            if (CancelOutcome == RecoveryOperationOutcome.Confirmed)
+                fixture.Orders.RemoveAll(item => item.OrderId == orderId);
             _observations[operationId] = new RecoveryOperationObservation(operationId, intent.Venue, intent.Account,
-                intent.Contract, "CancelOpeningRemainder", RecoveryOperationOutcome.Confirmed, orderId,
-                intent.PositionId, intent.Direction, intent.FilledQuantity, 0m, intent.PositionQuantity,
-                EntryOrderState: ManagedEntryTerminalState.Cancelled);
-            return Task.FromResult(RecoveryOperationOutcome.Confirmed);
+                intent.Contract, "CancelOpeningRemainder", CancelOutcome, orderId,
+                filled > 0m ? "position-" + intent.IntentId : intent.PositionId,
+                intent.Direction, filled,
+                CancelOutcome == RecoveryOperationOutcome.Confirmed ? 0m : remaining,
+                filled > 0m ? filled : intent.PositionQuantity,
+                EntryOrderState: CancelOutcome == RecoveryOperationOutcome.Confirmed
+                    ? remaining > 0m ? ManagedEntryTerminalState.Cancelled : ManagedEntryTerminalState.Filled
+                    : ManagedEntryTerminalState.Open,
+                FirstFillAt: filled > 0m ? clock.UtcNow : intent.FirstPartialFillAt);
+            return Task.FromResult(CancelOutcome);
         }
 
         public Task<RecoveryOperationOutcome> SetProtectionAsync(
@@ -950,6 +1570,7 @@ internal static class TradingLoopChecks
         {
             cancellationToken.ThrowIfCancellationRequested();
             DurableBeforeCallback(operationId);
+            Trace.Add("protect:" + positionId);
             var fixture = _accounts[(intent.Venue, intent.Account)];
             var position = fixture.Positions.SingleOrDefault(item => item.PositionId == positionId);
             if (position?.Quantity != actualQuantity)
@@ -990,9 +1611,22 @@ internal static class TradingLoopChecks
         private void DurableBeforeCallback(string operationId)
         {
             var saved = _store!.Load().State;
-            DurableTransferSeenBeforeEveryCallback &= saved.Operations.SingleOrDefault(operation =>
-                    operation.OperationId == operationId)?.Stage == RecoveryOperationStage.TransferStarted
+            var operation = saved.Operations.SingleOrDefault(candidate => candidate.OperationId == operationId);
+            DurableTransferSeenBeforeEveryCallback &= operation?.Stage == RecoveryOperationStage.TransferStarted
                 && saved.ManagedOrders.Any(order => order.PendingOperationId == operationId);
+            if (operation?.ActionKind != RecoveryActionKind.Entry)
+                return;
+
+            var managed = saved.ManagedOrders.SingleOrDefault(order => operationId.StartsWith(
+                order.IntentId + ":entry:", StringComparison.Ordinal));
+            var prepared = saved.TradingLoop.PendingSetup?.PreparedEntry;
+            PreparedEntrySavedBeforeEntryTransfer &= managed is not null && prepared is not null
+                && prepared.IntentId == managed.IntentId && prepared.Venue == managed.Venue
+                && prepared.Account == managed.Account && prepared.Contract == managed.Contract
+                && prepared.Asset == managed.Asset && prepared.EntryType == managed.EntryType
+                && (saved.TradingLoop.PendingSetup?.ReplacesIntentId is not { } replacedIntentId
+                    || saved.TradingLoop.LimitReassessments.TryGetValue(replacedIntentId, out var replaced)
+                        && replaced.ReplacementIntent == prepared);
         }
 
         private sealed class AccountFixture(string asset, decimal availableMargin, decimal balance)

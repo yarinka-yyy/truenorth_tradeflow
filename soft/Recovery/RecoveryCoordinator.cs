@@ -705,7 +705,7 @@ internal sealed class RecoveryCoordinator
         string operationId,
         bool savedOperatingIntent,
         CancellationToken cancellationToken = default,
-        Func<Func<bool>, bool>? entryAdmissionFence = null)
+        Func<Func<bool>, bool>? transferAdmissionFence = null)
     {
         await _stateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -743,8 +743,8 @@ internal sealed class RecoveryCoordinator
                 return SaveState(ReplaceOperation(_state, updated));
             }
 
-            return operation.ActionKind == RecoveryActionKind.Entry && entryAdmissionFence is not null
-                ? entryAdmissionFence(Begin)
+            return transferAdmissionFence is not null
+                ? transferAdmissionFence(Begin)
                 : Begin();
         }
         finally
