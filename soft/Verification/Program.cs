@@ -25,10 +25,17 @@ internal static class Program
         var recoveryOnly = args.Contains("--notifications-recovery", StringComparer.Ordinal);
         var orderLifecycleOnly = args.Contains("--order-lifecycle", StringComparer.Ordinal);
         var processRecoveryRuntimeOnly = args.Contains("--process-recovery-runtime", StringComparer.Ordinal);
+        var tradingLoopOnly = args.Contains("--trading-loop", StringComparer.Ordinal);
         var fixtureRoot = Path.Combine(ArtifactsDirectory(), ".fixtures", Guid.NewGuid().ToString("N"));
         try
         {
             Directory.CreateDirectory(fixtureRoot);
+            if (tradingLoopOnly)
+            {
+                TradingLoopChecks.CheckCoreAsync(Check, fixtureRoot).GetAwaiter().GetResult();
+                Console.WriteLine($"PASS: {_checks} trading-loop assertions (--trading-loop)");
+                return 0;
+            }
             if (processRecoveryRuntimeOnly)
             {
                 ProcessRecoveryChecks.CheckCore(Check, fixtureRoot);
@@ -87,6 +94,7 @@ internal static class Program
             EntryEligibilityChecks.CheckCore(Check);
             OrderLifecycleChecks.CheckCore(Check, fixtureRoot);
             OrderLifecycleChecks.CheckNativeWpf(Check, fixtureRoot);
+            TradingLoopChecks.CheckCoreAsync(Check, fixtureRoot).GetAwaiter().GetResult();
             RecoveryChecks.CheckCore(Check, fixtureRoot);
             ProcessRecoveryChecks.CheckCore(Check, fixtureRoot);
             ProcessRecoveryChecks.CheckRuntime(Check, fixtureRoot);

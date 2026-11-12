@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using TrueNorth.TradeFlow.Notifications;
 using TrueNorth.TradeFlow.Orders;
+using TrueNorth.TradeFlow.Trading;
 
 namespace TrueNorth.TradeFlow.Recovery;
 
@@ -92,15 +93,16 @@ internal sealed record RecoveryEvent(
     [property: JsonRequired] DateTimeOffset At,
     [property: JsonRequired] string Message,
     string? InternalDetail = null,
-    bool IsReminder = false)
+    bool IsReminder = false,
+    string? NotificationSummary = null)
 {
     [JsonIgnore]
-    internal string SafeSummary => Type switch
+    internal string SafeSummary => NotificationSummary ?? (Type switch
     {
         RecoveryEventType.Error => "Новые входы приостановлены; состояние требует полной сверки.",
         RecoveryEventType.Recovered => "Полная сверка завершена; незавершённые действия нельзя повторять автоматически.",
         _ => "Состояние восстановления требует проверки."
-    };
+    });
 }
 
 internal sealed record RecoveryJournalState
@@ -111,6 +113,7 @@ internal sealed record RecoveryJournalState
     public List<RecoveryEvent> Events { get; init; } = [];
     public List<NotificationDeliveryAttempt> NotificationAttempts { get; init; } = [];
     public DateTimeOffset? TelegramRetryAfterAt { get; init; }
+    public TradingLoopState TradingLoop { get; init; } = new();
 }
 
 internal sealed record RecoveryJournalEnvelope(int FormatVersion, RecoveryJournalState State);
@@ -242,7 +245,7 @@ internal sealed class RecoveryJournalStore
                                            or SecurityException or ArgumentException or NotSupportedException)
         {
             return new(false, RecoveryJournalStatus.Failed,
-                $"Не удалось сохранить журнал восстановления. Основной файл не заменён: {exception.Message}");
+                "Не удалось сохранить журнал восстановления. Основной файл не заменён; подробности скрыты.");
         }
         finally
         {
@@ -297,7 +300,7 @@ internal sealed class RecoveryJournalStore
         catch (Exception exception) when (exception is UnauthorizedAccessException or SecurityException or IOException)
         {
             return new(RecoveryJournalStatus.Unavailable, Message:
-                $"Журнал восстановления нельзя прочитать: {exception.Message}");
+                "Журнал восстановления нельзя прочитать; подробности скрыты.");
         }
 
         return Parse(bytes);
@@ -341,7 +344,7 @@ internal sealed class RecoveryJournalStore
                                            or FormatException or OverflowException or ArgumentException)
         {
             return new(RecoveryJournalStatus.Corrupt, bytes,
-                Message: $"Журнал восстановления повреждён: {exception.Message}");
+                Message: "Журнал восстановления повреждён; подробности скрыты.");
         }
     }
 
@@ -349,9 +352,26 @@ internal sealed class RecoveryJournalStore
     {
         error = null;
         if (state?.Venues is null || state.Operations is null || state.ManagedOrders is null || state.Events is null
-            || state.NotificationAttempts is null)
+            || state.NotificationAttempts is null || state.TradingLoop is null
+            || state.TradingLoop.NextSearchAt is null || state.TradingLoop.ActiveFailureIds is null)
         {
             error = "Журнал восстановления содержит отсутствующий список.";
+            return false;
+        }
+
+        if (state.TradingLoop.NextSearchAt.Any(item => !ValidAssetKey(item.Key) || item.Value == default)
+            || state.TradingLoop.ActiveFailureIds.Any(item => !ValidAssetKey(item.Key)
+                || !ValidJournalId(item.Value))
+            || state.TradingLoop.PendingSetup is { } pending
+                && (pending.Request is null || pending.Request.Id == Guid.Empty
+                    || !ValidAssetKey(pending.Request.Asset)
+                    || pending.Request.Market != pending.Request.Asset + "-USDC"
+                    || pending.Request.OrderType is not ("MARKET" or "LIMIT")
+                    || string.IsNullOrWhiteSpace(pending.Request.TemplateVersion)
+                    || string.IsNullOrWhiteSpace(pending.Request.Prompt)
+                    || pending.Response is null || pending.Response.RawText is null))
+        {
+            error = "Журнал восстановления содержит недопустимое состояние цикла торговли.";
             return false;
         }
 
@@ -477,6 +497,15 @@ internal sealed class RecoveryJournalStore
 
         return true;
     }
+
+    private static bool ValidAssetKey(string? asset) => !string.IsNullOrWhiteSpace(asset)
+        && asset.Length <= 15
+        && asset.All(character => character is >= 'A' and <= 'Z' or >= '0' and <= '9');
+
+    private static bool ValidJournalId(string? id) => !string.IsNullOrWhiteSpace(id)
+        && id.Length <= 256
+        && id.All(character => char.IsAsciiLetterOrDigit(character)
+            || character is ':' or '-' or '_' or '.');
 
     private sealed record FileRead(
         RecoveryJournalStatus Status,

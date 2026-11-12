@@ -266,15 +266,18 @@ internal sealed class OrderLifecycleCoordinator
         ManagedOrderIntent intent,
         EntryEligibilityInput eligibilityInput,
         bool savedOperatingIntent,
-        CancellationToken cancellationToken = default) =>
+        CancellationToken cancellationToken = default,
+        Func<Func<bool>, bool>? entryAdmissionFence = null) =>
         ExecuteSeriallyAsync(cancellationToken,
-            () => OpenCoreAsync(intent, eligibilityInput, savedOperatingIntent, cancellationToken));
+            () => OpenCoreAsync(intent, eligibilityInput, savedOperatingIntent, cancellationToken,
+                entryAdmissionFence));
 
     private async Task<OrderLifecycleResult> OpenCoreAsync(
         ManagedOrderIntent intent,
         EntryEligibilityInput eligibilityInput,
         bool savedOperatingIntent,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        Func<Func<bool>, bool>? entryAdmissionFence = null)
     {
         var now = _clock.UtcNow;
         if (!savedOperatingIntent || !eligibilityInput.Settings.SavedOperatingIntent
@@ -342,7 +345,7 @@ internal sealed class OrderLifecycleCoordinator
                     EligibilityEvaluatedAt = actionEligibilityMatches
                         ? actionEligibility!.EvaluatedAt : state.EligibilityEvaluatedAt
                 };
-            }).ConfigureAwait(false);
+            }, entryAdmissionFence: entryAdmissionFence).ConfigureAwait(false);
         if (!result.Succeeded || result.State is null)
         {
             if (!actionEligibilityMatches)
@@ -1215,7 +1218,8 @@ internal sealed class OrderLifecycleCoordinator
         Func<RecoverySnapshotRead, bool> precondition,
         Func<RecoverySnapshotRead, string, Task<RecoveryOperationOutcome>> send,
         CancellationToken cancellationToken,
-        Func<RecoverySnapshotRead, ManagedOrderState>? refreshState = null)
+        Func<RecoverySnapshotRead, ManagedOrderState>? refreshState = null,
+        Func<Func<bool>, bool>? entryAdmissionFence = null)
     {
         if (!_recovery.IsActionAllowed(state.Venue, state.Account, savedOperatingIntent,
                 recoveryAction, state.Contract))
@@ -1297,7 +1301,8 @@ internal sealed class OrderLifecycleCoordinator
         bool transferStarted;
         try
         {
-            transferStarted = await _recovery.BeginTransferAsync(operationId, savedOperatingIntent, cancellationToken)
+            transferStarted = await _recovery.BeginTransferAsync(operationId, savedOperatingIntent,
+                    cancellationToken, entryAdmissionFence)
                 .ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

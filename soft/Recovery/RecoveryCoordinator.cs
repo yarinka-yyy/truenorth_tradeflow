@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using TrueNorth.TradeFlow.Notifications;
 using TrueNorth.TradeFlow.Account;
 using TrueNorth.TradeFlow.Orders;
+using TrueNorth.TradeFlow.Trading;
 
 namespace TrueNorth.TradeFlow.Recovery;
 
@@ -139,11 +140,141 @@ internal sealed class RecoveryCoordinator
         ManagedOrders = [.. _state.ManagedOrders],
         Events = [.. _state.Events],
         NotificationAttempts = [.. _state.NotificationAttempts],
-        TelegramRetryAfterAt = _state.TelegramRetryAfterAt
+        TelegramRetryAfterAt = _state.TelegramRetryAfterAt,
+        TradingLoop = _state.TradingLoop.Copy()
     };
+
+    internal TradingLoopState TradingLoopState => _state.TradingLoop.Copy();
 
     internal void UpdateSettings(AppSettings settings) =>
         Volatile.Write(ref _settings, settings.Copy());
+
+    internal async Task<bool> SaveTradingLoopStateAsync(
+        TradingLoopState state,
+        CancellationToken cancellationToken = default)
+    {
+        await _stateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return _storageReady && SaveState(_state with { TradingLoop = state.Copy() });
+        }
+        finally
+        {
+            _stateGate.Release();
+        }
+    }
+
+    internal async Task<bool> SaveTradingLoopFailureAsync(
+        TradingLoopState state,
+        string asset,
+        string safeSummary,
+        string? detail,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(asset) || string.IsNullOrWhiteSpace(safeSummary))
+            return false;
+
+        await _stateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (!_storageReady)
+                return false;
+
+            var failureIds = new Dictionary<string, string>(_state.TradingLoop.ActiveFailureIds,
+                StringComparer.Ordinal);
+            if (!failureIds.TryGetValue(asset, out var failureId))
+            {
+                failureId = "loop-error-" + Guid.NewGuid().ToString("N");
+                failureIds.Add(asset, failureId);
+            }
+            var eventId = failureId + ":error";
+            var events = _state.Events;
+            if (!events.Any(item => item.EventId == eventId))
+            {
+                events = [.. events, new RecoveryEvent(eventId, RecoveryEventType.Error, failureId,
+                    "Trading loop", null, asset, null, _clock.UtcNow, safeSummary, detail,
+                    NotificationSummary: safeSummary)];
+            }
+
+            var updatedLoop = state.Copy() with { ActiveFailureIds = failureIds };
+            return SaveState(_state with { TradingLoop = updatedLoop, Events = events });
+        }
+        finally
+        {
+            _stateGate.Release();
+        }
+    }
+
+    internal async Task<bool> ClearTradingLoopFailureAsync(
+        TradingLoopState state,
+        string asset,
+        CancellationToken cancellationToken = default)
+    {
+        await _stateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (!_storageReady)
+                return false;
+
+            var failureIds = new Dictionary<string, string>(_state.TradingLoop.ActiveFailureIds,
+                StringComparer.Ordinal);
+            failureIds.Remove(asset);
+            return SaveState(_state with
+            {
+                TradingLoop = state.Copy() with { ActiveFailureIds = failureIds }
+            });
+        }
+        finally
+        {
+            _stateGate.Release();
+        }
+    }
+
+    internal async Task<RecoverySnapshotRead> ReadCurrentSnapshotAsync(
+        string venue,
+        string account,
+        CancellationToken cancellationToken = default)
+    {
+        var startedAt = _clock.UtcNow;
+        RecoverySnapshotRead? read = null;
+        string? failure = null;
+        try
+        {
+            if (!_storageReady)
+                failure = _storageMessage ?? "Журнал восстановления недоступен.";
+            else if (_source is null)
+                failure = "Источник свежих снимков не подключён.";
+            else
+                read = await _source.ReadAsync(venue, account, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            failure = "Не удалось прочитать точный снимок счёта; подробности скрыты.";
+        }
+
+        if (failure is null && _source is not null)
+        {
+            var probe = new RecoveryVenueState(venue, account, "trading-loop-read", startedAt,
+                "Проверка свежего снимка цикла.", RecoveryReadPhase.AdditionalReads,
+                1, 0, 1, Math.Max(1, Volatile.Read(ref _settings).RecoveryCheckSeconds),
+                startedAt.AddSeconds(1), false, false, true, null, null, startedAt);
+            var operations = _state.Operations.Where(operation => operation.Venue == venue
+                && operation.Account == account).ToArray();
+            failure = ValidateSnapshot(read, probe, operations, _source.MaximumSnapshotAge, _clock.UtcNow);
+        }
+
+        if (failure is not null)
+        {
+            await ReportFailureAsync(venue, account, failure, Volatile.Read(ref _settings), cancellationToken)
+                .ConfigureAwait(false);
+            return new(false, null, false, false, false, FailureReason: failure);
+        }
+        return read!;
+    }
 
     internal bool HasPendingRecovery => !_storageReady
         || _state.Venues.Any(venue => venue.Phase != RecoveryReadPhase.Resolved)
@@ -573,7 +704,8 @@ internal sealed class RecoveryCoordinator
     internal async Task<bool> BeginTransferAsync(
         string operationId,
         bool savedOperatingIntent,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        Func<Func<bool>, bool>? entryAdmissionFence = null)
     {
         await _stateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -581,30 +713,39 @@ internal sealed class RecoveryCoordinator
             if (!_storageReady)
                 return false;
             var operation = _state.Operations.SingleOrDefault(candidate => candidate.OperationId == operationId);
-            if (operation is not { Stage: RecoveryOperationStage.Prepared }
-                || !IsActionAllowed(operation.Venue, operation.Account, savedOperatingIntent,
-                    operation.ActionKind, operation.Market, operationId))
+            if (operation is not { Stage: RecoveryOperationStage.Prepared })
                 return false;
 
-            var now = _clock.UtcNow;
-            if (operation.DeadlineAt is { } deadlineAt && deadlineAt <= now)
+            bool Begin()
             {
-                var abandoned = operation with
+                if (!_storageReady || !IsActionAllowed(operation.Venue, operation.Account, savedOperatingIntent,
+                        operation.ActionKind, operation.Market, operationId))
+                    return false;
+
+                var now = _clock.UtcNow;
+                if (operation.DeadlineAt is { } deadlineAt && deadlineAt <= now)
                 {
-                    Stage = RecoveryOperationStage.Abandoned,
-                    CompletedAt = now,
-                    Outcome = "Срок подготовки истёк до участка передачи."
+                    var abandoned = operation with
+                    {
+                        Stage = RecoveryOperationStage.Abandoned,
+                        CompletedAt = now,
+                        Outcome = "Срок подготовки истёк до участка передачи."
+                    };
+                    SaveState(ReplaceOperation(_state, abandoned));
+                    return false;
+                }
+
+                var updated = operation with
+                {
+                    Stage = RecoveryOperationStage.TransferStarted,
+                    TransferStartedAt = now
                 };
-                SaveState(ReplaceOperation(_state, abandoned));
-                return false;
+                return SaveState(ReplaceOperation(_state, updated));
             }
 
-            var updated = operation with
-            {
-                Stage = RecoveryOperationStage.TransferStarted,
-                TransferStartedAt = now
-            };
-            return SaveState(ReplaceOperation(_state, updated));
+            return operation.ActionKind == RecoveryActionKind.Entry && entryAdmissionFence is not null
+                ? entryAdmissionFence(Begin)
+                : Begin();
         }
         finally
         {
@@ -798,10 +939,10 @@ internal sealed class RecoveryCoordinator
                 read = null;
                 failure = "Чтение восстановления было прервано.";
             }
-            catch (Exception exception)
+            catch (Exception)
             {
                 read = null;
-                failure = $"Не удалось прочитать состояние: {exception.Message}";
+                failure = "Не удалось прочитать состояние; подробности скрыты.";
             }
 
             await _stateGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
