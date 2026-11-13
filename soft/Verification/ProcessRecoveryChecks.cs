@@ -660,16 +660,36 @@ internal static class ProcessRecoveryChecks
             {
                 var exhaustedStatus = ProcessRestartBudgetStore.ExhaustedStatus(ProcessRecoveryKind.BackgroundWorker);
                 WaitForCondition(() => statuses.Contains(exhaustedStatus), TimeSpan.FromSeconds(10));
-                WaitForCondition(() => recovery.State.Events.Any(item => item.Type == RecoveryEventType.Error
-                    && item.Venue == Venue && item.Account == Account && item.InternalDetail == exhaustedStatus),
-                    TimeSpan.FromSeconds(10));
-                check(reconcileCalls == 1 && supervisor.CurrentProcessId is null
-                      && launches.Count == 1
-                      && recovery.State.Events.Any(item => item.Type == RecoveryEventType.Error
-                          && item.Venue == Venue && item.Account == Account && item.InternalDetail == exhaustedStatus)
-                      && recovery.IsEntryAllowed("Independent Fixture Venue", savedOperatingIntent: true)
-                      && statuses.Contains(exhaustedStatus),
-                    $"worker restart budget exhaustion retained PID {initialPid}/{initialStart}, emitted its exact-scope error event, and did not launch a fourth process");
+                WaitForCondition(() =>
+                {
+                    var exactErrorRecorded = recovery.State.Events.Any(item => item.Type == RecoveryEventType.Error
+                        && item.Venue == Venue && item.Account == Account && item.InternalDetail == exhaustedStatus);
+                    var storageReady = recovery.StorageReady;
+                    var storageStatus = recovery.StorageStatus;
+                    return exactErrorRecorded && storageReady && storageStatus == RecoveryJournalStatus.Loaded;
+                }, TimeSpan.FromSeconds(10));
+                var currentPid = supervisor.CurrentProcessId;
+                var recoveryState = recovery.State;
+                var errorEvent = recoveryState.Events.FirstOrDefault(item => item.Type == RecoveryEventType.Error
+                    && item.Venue == Venue && item.Account == Account && item.InternalDetail == exhaustedStatus);
+                var storageReady = recovery.StorageReady;
+                var storageStatus = recovery.StorageStatus;
+                var independentVenueAllowed = recovery.IsEntryAllowed("Independent Fixture Venue", savedOperatingIntent: true);
+                var exhaustedStatusReported = statuses.Contains(exhaustedStatus);
+                check(reconcileCalls == 1,
+                    $"exhausted worker budget runs one full reconciliation (calls={reconcileCalls}, initial={initialPid}/{initialStart})");
+                check(currentPid is null && launches.Count == 1,
+                    $"exhausted worker budget leaves no current PID and does not restart the worker "
+                    + $"(current={currentPid?.ToString() ?? "none"}, launches={launches.Count}, initial={initialPid}/{initialStart})");
+                check(storageReady && storageStatus == RecoveryJournalStatus.Loaded && errorEvent is not null,
+                    $"exhausted worker budget durably records its exact venue/account error "
+                    + $"(ready={storageReady}, storage={storageStatus}, event={(errorEvent is null ? "missing" : $"{errorEvent.Type}/{errorEvent.Venue}/{errorEvent.Account}/{errorEvent.InternalDetail}")})");
+                check(independentVenueAllowed,
+                    $"exhausted worker budget leaves another venue entry-eligible "
+                    + $"(allowed={independentVenueAllowed}, ready={storageReady}, storage={storageStatus}, "
+                    + $"venues={string.Join(';', recoveryState.Venues.Select(state => $"{state.Venue}/{state.Account}:{state.Phase}"))})");
+                check(exhaustedStatusReported,
+                    $"exhausted worker budget publishes its exact status (reported={exhaustedStatusReported})");
             }
             else if (!savedOperatingIntent)
             {

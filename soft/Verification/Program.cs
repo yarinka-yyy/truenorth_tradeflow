@@ -2,8 +2,10 @@ using System.Globalization;
 using System.IO;
 using System.Text.Json;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
+using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
@@ -523,29 +525,81 @@ internal static class Program
                       && Get<TextBlock>(restartedWindow, "OperatingIntentText").Text.Contains("не запущен", StringComparison.Ordinal),
                     "restart restores mode and intent while keeping actual monitoring off");
                 Check(appliedRequests.Count == 0, "loading the saved sleep setting does not make a request while monitoring is off");
-            restartedWindow.Width = 760;
-            restartedWindow.Height = 560;
+                restartedWindow.Width = 760;
+                restartedWindow.Height = 560;
                 restartedWindow.Show();
-                Get<ListBox>(restartedWindow, "NavigationList").SelectedIndex = 1;
+                var navigation = Get<ListBox>(restartedWindow, "NavigationList");
                 restartedWindow.UpdateLayout();
-            PumpDispatcher();
-            var scrollViewer = Get<ScrollViewer>(restartedWindow, "MainScrollViewer");
-            var minimumAssets = Get<ListBox>(restartedWindow, "AssetsList");
-            var firstMinimumAsset = minimumAssets.ItemContainerGenerator.ContainerFromIndex(0) as ListBoxItem
-                ?? throw new InvalidOperationException("Minimum-width asset row was not generated.");
-            var minimumAssetEditor = FindVisualChild<TextBox>(firstMinimumAsset)
-                ?? throw new InvalidOperationException("Minimum-width asset editor was not generated.");
-            RenderWindow(restartedWindow, Path.Combine(ArtifactsDirectory(), "settings-window-minimum-top.png"));
-            Check(minimumAssetEditor.ActualWidth > 100, "long asset text remains editable at the minimum window width");
-            scrollViewer.ScrollToVerticalOffset(scrollViewer.ScrollableHeight);
+                var scrollViewer = Get<ScrollViewer>(restartedWindow, "MainScrollViewer");
+                PumpDispatcher();
+                var modeText = Get<TextBlock>(restartedWindow, "CurrentModeText");
+                var overviewIntent = Get<TextBlock>(restartedWindow, "OperatingIntentText");
+                var sessionState = Get<TextBlock>(restartedWindow, "TrueNorthSessionStateText");
+                var openSession = Get<Button>(restartedWindow, "OpenTrueNorthButton");
+                var checkSession = Get<Button>(restartedWindow, "CheckTrueNorthSessionButton");
+                scrollViewer.ScrollToVerticalOffset(0);
+                Check(restartedWindow.ActualWidth is >= 759 and <= 761
+                      && modeText.Text.Contains("TrueNorth AI setups", StringComparison.Ordinal)
+                      && overviewIntent.Text.Contains("не запущен", StringComparison.Ordinal)
+                      && sessionState.Text == "Статус входа неизвестен"
+                      && openSession.IsVisible && checkSession.IsVisible
+                      && IsInViewport(openSession, scrollViewer) && IsInViewport(checkSession, scrollViewer),
+                    "reopened overview at 760x560 shows the saved mode, idle intent, unknown session and reachable actions");
+                RenderWindow(restartedWindow, Path.Combine(ArtifactsDirectory(), "overview-reopened-760x560.png"));
+                navigation.SelectedIndex = 1;
                 restartedWindow.UpdateLayout();
                 PumpDispatcher();
+                var minimumAssets = Get<ListBox>(restartedWindow, "AssetsList");
+                var firstMinimumAsset = minimumAssets.ItemContainerGenerator.ContainerFromIndex(0) as ListBoxItem
+                    ?? throw new InvalidOperationException("Minimum-width asset row was not generated.");
+                var minimumAssetEditor = FindVisualChild<TextBox>(firstMinimumAsset)
+                    ?? throw new InvalidOperationException("Minimum-width asset editor was not generated.");
+                var reloadedAssets = ((System.Collections.ObjectModel.ObservableCollection<AssetDraft>)minimumAssets.ItemsSource!)
+                    .Select(row => row.Text).ToArray();
+                var reloadedEntryType = (Get<ComboBox>(restartedWindow, "EntryTypeComboBox").SelectedItem as ComboBoxItem)?.Tag as string;
+                Check(reloadedAssets.SequenceEqual(["BTC", "ETHUSDT-PERP"])
+                      && reloadedEntryType == "Market"
+                      && Get<TextBox>(restartedWindow, "MarginPercentTextBox").Text == 42m.ToString(CultureInfo.CurrentCulture)
+                      && Get<TextBox>(restartedWindow, "LeverageTextBox").Text == 3.25m.ToString(CultureInfo.CurrentCulture),
+                    "reopened settings restore asset order, entry type, margin and leverage from the same profile");
+                RenderWindow(restartedWindow, Path.Combine(ArtifactsDirectory(), "settings-window-minimum-top.png"));
+                Check(minimumAssetEditor.ActualWidth > 100, "long asset text remains editable at the minimum window width");
+
+                var saveButton = Get<Button>(restartedWindow, "SaveSettingsButton");
+                var cancelButton = Get<Button>(restartedWindow, "CancelSettingsButton");
+                var settingsStatus = Get<TextBlock>(restartedWindow, "SettingsStatusText");
+                var saveFocusStep = -1;
+                var cancelFocusStep = -1;
+                Keyboard.Focus(minimumAssetEditor);
+                for (var step = 0; step < 100 && cancelFocusStep < 0; step++)
+                {
+                    if (Keyboard.FocusedElement is not UIElement focused
+                        || !focused.MoveFocus(new TraversalRequest(FocusNavigationDirection.Next)))
+                        break;
+                    PumpDispatcher();
+                    if (saveButton.IsKeyboardFocused && saveFocusStep < 0)
+                        saveFocusStep = step;
+                    if (cancelButton.IsKeyboardFocused)
+                        cancelFocusStep = step;
+                }
+                Check(saveFocusStep >= 0 && cancelFocusStep > saveFocusStep
+                      && cancelButton.IsKeyboardFocused && cancelButton.FocusVisualStyle is not null
+                      && IsInViewport(saveButton, scrollViewer) && IsInViewport(cancelButton, scrollViewer)
+                      && settingsStatus.Text.Contains("Настройки загружены", StringComparison.Ordinal)
+                      && IsInViewport(settingsStatus, scrollViewer),
+                    $"Tab from a settings field reaches Save then Cancel after scrolling at 760x560 "
+                    + $"(save={saveFocusStep}, cancel={cancelFocusStep}, offset={scrollViewer.VerticalOffset:0.0}/{scrollViewer.ScrollableHeight:0.0})");
                 RenderWindow(restartedWindow, Path.Combine(ArtifactsDirectory(), "settings-window-bottom.png"));
-            Check(scrollViewer.ScrollableHeight > 0
-                  && scrollViewer.VerticalOffset >= scrollViewer.ScrollableHeight - 1
-                  && Get<Button>(restartedWindow, "SaveSettingsButton").ActualWidth > 0
-                  && Get<Button>(restartedWindow, "CancelSettingsButton").ActualWidth > 0,
-                "Save and Cancel remain laid out at the minimum window width");
+
+                scrollViewer.ScrollToVerticalOffset(scrollViewer.ScrollableHeight);
+                restartedWindow.UpdateLayout();
+                PumpDispatcher();
+                Check(restartedWindow.ActualHeight is >= 559 and <= 561
+                      && scrollViewer.ScrollableHeight > 0
+                      && scrollViewer.VerticalOffset >= scrollViewer.ScrollableHeight - 1
+                      && saveButton.ActualWidth > 0
+                      && cancelButton.ActualWidth > 0,
+                    "Save and Cancel remain laid out at the exact minimum window size");
             }
             finally
             {
@@ -644,6 +698,7 @@ internal static class Program
             ProcessRecoveryChecks.CheckNativeWpf(Check, root);
             NotificationChecks.CheckNativeWpf(Check, root);
             TradingLoopChecks.CheckMainWindow(Check, app, root, ArtifactsDirectory());
+            CheckCorruptSettingsUi(Check, root);
         }
         finally
         {
@@ -654,6 +709,167 @@ internal static class Program
             }
             controller.Dispose();
             app.Shutdown();
+        }
+    }
+
+    private static void CheckCorruptSettingsUi(Action<bool, string> check, string root)
+    {
+        var path = Path.Combine(root, "wpf", "settings.json");
+        var store = new SettingsStore(path);
+        var backup = new SettingsStore(path + ".bak").Load();
+        check(backup.Status == SettingsFileStatus.Loaded,
+            "corrupt-settings UI fixture retains a readable last-known-good backup");
+
+        var corruptBytes = System.Text.Encoding.UTF8.GetBytes("{broken");
+        File.WriteAllBytes(path, corruptBytes);
+        var corruptLoad = store.Load();
+        check(corruptLoad.Status == SettingsFileStatus.Corrupt && corruptLoad.CanRecover,
+            "corrupt-settings UI fixture reports recoverable damaged input");
+
+        using var controller = new WakeProtectionController(false, _ => true);
+        var window = new MainWindow(store, corruptLoad, controller)
+        {
+            Width = 760,
+            Height = 560
+        };
+        var scaledContent = window.Content as FrameworkElement
+            ?? throw new InvalidOperationException("Corrupt-settings WPF root content was not generated.");
+        try
+        {
+            window.Show();
+            PumpDispatcher();
+            var dpi = VisualTreeHelper.GetDpi(window);
+            check(window.ActualWidth is >= 759 and <= 761 && window.ActualHeight is >= 559 and <= 561,
+                $"corruption fixture renders the fixed 760x560 window (actual={window.ActualWidth:0.0}x{window.ActualHeight:0.0})");
+            RenderWindow(window, Path.Combine(ArtifactsDirectory(), "overview-corrupt-760x560.png"));
+
+            Get<ListBox>(window, "NavigationList").SelectedIndex = 1;
+            window.UpdateLayout();
+            PumpDispatcher();
+            var scroll = Get<ScrollViewer>(window, "MainScrollViewer");
+            var status = Get<TextBlock>(window, "SettingsStatusText");
+            var save = Get<Button>(window, "SaveSettingsButton");
+            var cancel = Get<Button>(window, "CancelSettingsButton");
+            var recover = Get<Button>(window, "RecoverSettingsButton");
+            check(status.Text.Contains("Файл настроек повреждён", StringComparison.Ordinal)
+                  && status.ActualHeight > 0 && recover.Visibility == Visibility.Visible
+                  && recover.IsEnabled && AutomationProperties.GetName(recover).Length > 0,
+                "settings UI explains corruption and exposes the named recovery action");
+            RenderWindow(window, Path.Combine(ArtifactsDirectory(), "settings-corrupt-760x560.png"));
+
+            var entryType = Get<ComboBox>(window, "EntryTypeComboBox");
+            var saveStep = -1;
+            var cancelStep = -1;
+            var recoverStep = -1;
+            Keyboard.Focus(entryType);
+            for (var step = 0; step < 100 && recoverStep < 0; step++)
+            {
+                if (Keyboard.FocusedElement is not UIElement focused
+                    || !focused.MoveFocus(new TraversalRequest(FocusNavigationDirection.Next)))
+                    break;
+                PumpDispatcher();
+                if (save.IsKeyboardFocused && saveStep < 0)
+                    saveStep = step;
+                if (cancel.IsKeyboardFocused && cancelStep < 0)
+                    cancelStep = step;
+                if (recover.IsKeyboardFocused)
+                    recoverStep = step;
+            }
+            scroll.ScrollToVerticalOffset(scroll.ScrollableHeight);
+            window.UpdateLayout();
+            PumpDispatcher();
+            var statusBounds = GetViewportBounds(status, scroll);
+            var recoverBounds = GetViewportBounds(recover, scroll);
+            var viewportBounds = new Rect(0, 0, scroll.ViewportWidth, scroll.ViewportHeight);
+            check(saveStep >= 0 && cancelStep > saveStep && recoverStep > cancelStep,
+                $"760x560 Tab path reaches Save, Cancel, then recovery "
+                + $"(save={saveStep}, cancel={cancelStep}, recover={recoverStep})");
+            check(recover.IsKeyboardFocused && recover.FocusVisualStyle is not null,
+                $"760x560 fixture keeps visible keyboard focus on the recovery action "
+                + $"(focused={recover.IsKeyboardFocused}, focus-style={recover.FocusVisualStyle is not null})");
+            check(IsInViewport(status, scroll),
+                $"760x560 fixture keeps the corruption status in the scroll viewport "
+                + $"(status={statusBounds}, viewport={viewportBounds}, offset={scroll.VerticalOffset:0.0}/{scroll.ScrollableHeight:0.0})");
+            check(IsInViewport(recover, scroll),
+                $"760x560 fixture keeps the focused recovery action in the scroll viewport "
+                + $"(recovery={recoverBounds}, viewport={viewportBounds}, offset={scroll.VerticalOffset:0.0}/{scroll.ScrollableHeight:0.0})");
+            RenderWindow(window, Path.Combine(ArtifactsDirectory(), "settings-corrupt-tab-recovery-760x560.png"));
+
+            scaledContent.LayoutTransform = new ScaleTransform(1.25, 1.25);
+            window.Width = 950;
+            window.Height = 700;
+            window.UpdateLayout();
+            PumpDispatcher();
+            Console.WriteLine($"WPF_FIXTURE_DPI={dpi.PixelsPerInchX:0}x{dpi.PixelsPerInchY:0} "
+                + $"({dpi.DpiScaleX:0.00}x{dpi.DpiScaleY:0.00}); synthetic content LayoutTransform=1.25x, window=950x700");
+            check(window.ActualWidth is >= 949 and <= 951 && window.ActualHeight is >= 699 and <= 701,
+                $"125% synthetic fixture renders its 760x560 logical content at 950x700 "
+                + $"(actual={window.ActualWidth:0.0}x{window.ActualHeight:0.0})");
+            Get<ListBox>(window, "NavigationList").SelectedIndex = 0;
+            window.UpdateLayout();
+            PumpDispatcher();
+            RenderWindow(window, Path.Combine(ArtifactsDirectory(), "overview-corrupt-125pct-fixture-950x700.png"));
+            Get<ListBox>(window, "NavigationList").SelectedIndex = 1;
+            window.UpdateLayout();
+            PumpDispatcher();
+            RenderWindow(window, Path.Combine(ArtifactsDirectory(), "settings-corrupt-125pct-fixture-950x700.png"));
+
+            scroll.ScrollToVerticalOffset(0);
+            window.UpdateLayout();
+            PumpDispatcher();
+            Keyboard.Focus(entryType);
+            saveStep = -1;
+            cancelStep = -1;
+            recoverStep = -1;
+            for (var step = 0; step < 100 && recoverStep < 0; step++)
+            {
+                if (Keyboard.FocusedElement is not UIElement focused
+                    || !focused.MoveFocus(new TraversalRequest(FocusNavigationDirection.Next)))
+                    break;
+                PumpDispatcher();
+                if (save.IsKeyboardFocused && saveStep < 0)
+                    saveStep = step;
+                if (cancel.IsKeyboardFocused && cancelStep < 0)
+                    cancelStep = step;
+                if (recover.IsKeyboardFocused)
+                    recoverStep = step;
+            }
+            scroll.ScrollToVerticalOffset(scroll.ScrollableHeight);
+            window.UpdateLayout();
+            PumpDispatcher();
+            statusBounds = GetViewportBounds(status, scroll);
+            recoverBounds = GetViewportBounds(recover, scroll);
+            viewportBounds = new Rect(0, 0, scroll.ViewportWidth, scroll.ViewportHeight);
+            check(saveStep >= 0 && cancelStep > saveStep && recoverStep > cancelStep,
+                $"125% synthetic fixture Tab path reaches Save, Cancel, then recovery "
+                + $"(save={saveStep}, cancel={cancelStep}, recover={recoverStep})");
+            check(recover.IsKeyboardFocused && recover.FocusVisualStyle is not null,
+                $"125% synthetic fixture keeps visible keyboard focus on the recovery action "
+                + $"(focused={recover.IsKeyboardFocused}, focus-style={recover.FocusVisualStyle is not null})");
+            check(IsInViewport(status, scroll),
+                $"125% synthetic fixture keeps the corruption status in the scroll viewport "
+                + $"(status={statusBounds}, viewport={viewportBounds}, offset={scroll.VerticalOffset:0.0}/{scroll.ScrollableHeight:0.0})");
+            check(IsInViewport(recover, scroll),
+                $"125% synthetic fixture keeps the focused recovery action in the scroll viewport "
+                + $"(recovery={recoverBounds}, viewport={viewportBounds}, offset={scroll.VerticalOffset:0.0}/{scroll.ScrollableHeight:0.0})");
+            RenderWindow(window, Path.Combine(ArtifactsDirectory(), "settings-corrupt-tab-recovery-125pct-fixture-950x700.png"));
+
+            Click(recover);
+            PumpDispatcher();
+            var recovered = store.Load();
+            var archives = Directory.GetFiles(Path.GetDirectoryName(path)!, Path.GetFileName(path) + ".corrupt.*");
+            check(status.Text.Contains("Последняя исправная копия восстановлена", StringComparison.Ordinal)
+                  && recover.Visibility == Visibility.Collapsed
+                  && ProfilesEqual(backup.Profile, recovered.Profile)
+                  && archives.Length == 1 && File.ReadAllBytes(archives[0]).SequenceEqual(corruptBytes),
+                $"UI recovery restores the verified backup and archives the corrupt bytes unchanged "
+                + $"(status={recovered.Status}, archives={archives.Length}, source={path})");
+            RenderWindow(window, Path.Combine(ArtifactsDirectory(), "settings-recovered-125pct-fixture-950x700.png"));
+        }
+        finally
+        {
+            window.AllowApplicationClose();
+            window.Close();
         }
     }
 
@@ -741,6 +957,17 @@ internal static class Program
         }
         return null;
     }
+
+    private static bool IsInViewport(FrameworkElement element, ScrollViewer scroll)
+    {
+        var bounds = GetViewportBounds(element, scroll);
+        return new Rect(0, 0, scroll.ViewportWidth, scroll.ViewportHeight)
+            .Contains(bounds);
+    }
+
+    private static Rect GetViewportBounds(FrameworkElement element, ScrollViewer scroll) =>
+        element.TransformToAncestor(scroll).TransformBounds(
+            new Rect(new Point(0, 0), new Size(element.ActualWidth, element.ActualHeight)));
 
     private static void PumpDispatcher()
     {
