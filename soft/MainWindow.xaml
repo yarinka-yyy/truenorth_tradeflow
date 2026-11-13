@@ -139,6 +139,8 @@
                 </Expander>
                 <TextBlock x:Name="LocalScenarioActivityText" Foreground="{StaticResource TextBrush}"
                            FontSize="11" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
+                <TextBlock x:Name="LocalScenarioStatusText" Foreground="{StaticResource MutedBrush}"
+                           FontSize="11" TextWrapping="Wrap" AutomationProperties.Name="Последний статус локального цикла" />
                 <TextBlock x:Name="LocalScenarioPauseText" Foreground="{StaticResource WarningBrush}"
                            FontSize="11" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
                 <TextBlock x:Name="LocalScenarioActionStatusText" Foreground="{StaticResource MutedBrush}"
@@ -315,6 +317,19 @@
                     </ComboBox>
                     <TextBlock x:Name="EntryTypeErrorText" Foreground="{StaticResource WarningBrush}" Margin="0,5,0,8"
                                TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
+
+                    <TextBlock Text="Способ выбора сетапа" FontWeight="SemiBold" Margin="0,2,0,6" />
+                    <ComboBox x:Name="CandidateSelectionMethodComboBox" Style="{StaticResource FormComboBox}"
+                              AutomationProperties.Name="Способ выбора сетапа">
+                      <ComboBoxItem Content="По порядку активов" Tag="AssetOrder" />
+                      <ComboBoxItem Content="Чистая прибыль" Tag="NetProfitAtTakeProfit" />
+                    </ComboBox>
+                    <TextBlock x:Name="CandidateSelectionMethodHelpText"
+                               Text="Сравнивает чистую оценку при достижении TP."
+                               Foreground="{StaticResource MutedBrush}" Margin="0,4,0,0"
+                               TextWrapping="Wrap" />
+                    <TextBlock x:Name="CandidateSelectionMethodErrorText" Foreground="{StaticResource WarningBrush}"
+                               Margin="0,4,0,8" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite" />
 
                     <TextBlock Text="Баланс для маржи" FontWeight="SemiBold" Margin="0,2,0,6" />
                     <DockPanel>

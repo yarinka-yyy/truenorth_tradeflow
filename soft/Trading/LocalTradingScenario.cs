@@ -704,9 +704,11 @@ internal sealed class LocalTradingScenario : IDisposable
         if (assets.Length == 0)
             assets = "не заданы";
         var entry = settings.EntryType ?? "не задан";
+        var selection = settings.CandidateSelectionMethod == "NetProfitAtTakeProfit"
+            ? "чистый результат на TP" : "порядок активов";
         var margin = settings.MarginBalancePercent?.ToString("0.##", CultureInfo.CurrentCulture) ?? "не задан";
         var leverage = settings.Leverage?.ToString("0.##", CultureInfo.CurrentCulture) ?? "не задано";
-        return $"Режим: {profile.SelectedMode}; активы: {assets}; вход: {entry}; маржа: {margin}%; плечо: ×{leverage}.";
+        return $"Режим: {profile.SelectedMode}; активы: {assets}; вход: {entry}; выбор: {selection}; маржа: {margin}%; плечо: ×{leverage}.";
     }
 
     private void OnRecoveryStatusChanged() => Publish(new(true, _loop.Status));

@@ -7,6 +7,7 @@ internal sealed class AppSettings
 {
     public List<string?> Assets { get; set; } = [];
     public string? EntryType { get; set; }
+    public string CandidateSelectionMethod { get; set; } = "AssetOrder";
     public decimal? MarginBalancePercent { get; set; }
     public decimal? Leverage { get; set; }
     public int PositionCheckMinutes { get; set; } = 60;
@@ -34,6 +35,7 @@ internal sealed class AppSettings
     {
         Assets = Assets?.ToList() ?? [],
         EntryType = EntryType,
+        CandidateSelectionMethod = CandidateSelectionMethod,
         MarginBalancePercent = MarginBalancePercent,
         Leverage = Leverage,
         PositionCheckMinutes = PositionCheckMinutes,
@@ -133,6 +135,9 @@ internal static class SettingsValidator
         settings.EntryType = string.IsNullOrWhiteSpace(settings.EntryType) ? null : settings.EntryType.Trim();
         if (settings.EntryType is not null && settings.EntryType is not ("Market" or "Limit"))
             errors[nameof(AppSettings.EntryType)] = "Выберите Market или Limit.";
+
+        if (settings.CandidateSelectionMethod is not ("AssetOrder" or "NetProfitAtTakeProfit"))
+            errors[nameof(AppSettings.CandidateSelectionMethod)] = "Выберите допустимый способ выбора сетапа.";
 
         if (settings.MarginBalancePercent is <= 0 or > 100)
             errors[nameof(AppSettings.MarginBalancePercent)] = "Укажите значение больше 0 и не больше 100.";

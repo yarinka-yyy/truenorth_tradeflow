@@ -9,7 +9,9 @@ internal sealed record TradingLoopPendingSetup(
     DateTimeOffset? ReceivedAt,
     int? LimitReassessmentMinutes = null,
     TradingLoopPreparedEntry? PreparedEntry = null,
-    string? ReplacesIntentId = null);
+    string? ReplacesIntentId = null,
+    bool WasCandidateRanked = false,
+    string? CandidateRankingSummary = null);
 
 internal sealed record TradingLoopPreparedEntry(
     string IntentId,

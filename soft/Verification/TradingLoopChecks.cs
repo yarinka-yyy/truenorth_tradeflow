@@ -27,6 +27,11 @@ internal static class TradingLoopChecks
     internal static async Task CheckCoreAsync(Action<bool, string> check, string root)
     {
         await CheckNoSetupSurvivesRestart(check, Path.Combine(root, "trading-loop-no-setup"));
+        CheckCandidateProfitEstimates(check);
+        await CheckCandidateRanking(check, Path.Combine(root, "trading-loop-ranking"));
+        await CheckCandidateCollectionDeadline(check, Path.Combine(root, "trading-loop-ranking-deadline"));
+        await CheckUncooperativeCandidateCancellation(check, Path.Combine(root, "trading-loop-ranking-uncooperative"));
+        await CheckCandidateRankingCancellation(check, root);
         await CheckFundsShortfallSkipsAi(check, Path.Combine(root, "trading-loop-no-funds"));
         await CheckConfirmedMinimumSkipsAi(check, Path.Combine(root, "trading-loop-confirmed-minimum"));
         await CheckReassessmentAgeBoundary(check, Path.Combine(root, "trading-loop-expired"));
@@ -55,6 +60,359 @@ internal static class TradingLoopChecks
         await CheckLocalScenarioFallbackDeadline(check, Path.Combine(root, "trading-loop-local-fallback-deadline"));
         await CheckLocalScenarioHeldDeadline(check, Path.Combine(root, "trading-loop-local-held-deadline"));
         await CheckLocalScenarioLimitDeadline(check, Path.Combine(root, "trading-loop-local-limit-deadline"));
+    }
+
+    private static void CheckCandidateProfitEstimates(Action<bool, string> check)
+    {
+        var fixture = EntryEligibilityExample.Create();
+        var source = fixture.Pools.Single(pool => pool.Account.Venue == "Scenario Venue A");
+        var instrument = source.Instruments.Single(item => item.Identity.Contract == "SOL-PERP") with
+        {
+            EntryFeeRate = 0.001m,
+            ExitFeeRate = 0.001m,
+            Funding = source.Instruments.Single(item => item.Identity.Contract == "SOL-PERP").Funding! with
+            {
+                RatePerInterval = 0.0005m,
+                IntervalHours = 1m,
+                Price = 100m,
+                PositiveRateMeansLongPays = true
+            }
+        };
+        var longSetup = new EntryEligibilitySetup(EntrySetupState.Complete, "SOL", "SOL-USDC", "Market",
+            null, PositionDirection.Long, 111m, 90m, "USDC/SOL", "local fixture", InitialTime);
+        var shortSetup = longSetup with { Direction = PositionDirection.Short, TakeProfit = 90m, StopLoss = 110m };
+
+        var longValid = CandidateProfitEstimator.TryCalculate(longSetup, "USDC", 100m, 2m, 2m,
+            instrument, out var longEstimate, out _);
+        var shortValid = CandidateProfitEstimator.TryCalculate(shortSetup, "USDC", 100m, 2m, 2m,
+            instrument, out var shortEstimate, out _);
+        check(longValid && longEstimate is { GrossProfit: 22m, EntryFee: 0.2m, ExitFee: 0.222m,
+                  AdverseFunding: 2.4m, NetProfit: 19.178m }
+              && shortValid && shortEstimate is { GrossProfit: 20m, EntryFee: 0.2m, ExitFee: 0.18m,
+                  AdverseFunding: 0m, NetProfit: 19.62m },
+            $"TP calculation matches the agreed Long/Short funding example (Long={longEstimate}; Short={shortEstimate})");
+
+        var rounded = CandidateProfitEstimator.TryCalculate(longSetup, "USDC", 100m, 20m, 2m,
+            instrument with { ContractMultiplier = 0.1m }, out var roundedEstimate, out _);
+        check(rounded && roundedEstimate == longEstimate,
+            "candidate PnL uses rounded base quantity after the contract multiplier");
+
+        var makerUnknown = CandidateProfitEstimator.TryCalculate(longSetup, "USDC", 100m, 2m, 2m,
+            instrument with { EntryFeeRate = null }, out _, out _);
+        var fundingUnknown = CandidateProfitEstimator.TryCalculate(longSetup, "USDC", 100m, 2m, 2m,
+            instrument with { Funding = instrument.Funding! with { PositiveRateMeansLongPays = null } }, out _, out _);
+        var badTakeProfitStep = CandidateProfitEstimator.TryCalculate(longSetup with { TakeProfit = 111.005m },
+            "USDC", 100m, 2m, 2m, instrument, out _, out _);
+        var quantityOverflow = CandidateProfitEstimator.TryCalculate(longSetup, "USDC", 100m,
+            decimal.MaxValue, decimal.MaxValue, instrument with { ContractMultiplier = 2m }, out _, out _);
+        check(!makerUnknown && !fundingUnknown && !badTakeProfitStep && !quantityOverflow,
+            "unknown confirmed costs, overflow, and a TP outside the market price step exclude the candidate");
+
+        var flipsFunding = CandidateProfitEstimator.TryCalculate(longSetup, "USDC", 100m, 2m, 2m,
+            instrument with { Funding = instrument.Funding! with { PositiveRateMeansLongPays = false } },
+            out var reversedFunding, out _);
+        check(flipsFunding && reversedFunding?.AdverseFunding == 0m,
+            "confirmed funding sign changes which side pays and funding credits remain zero");
+
+        var winner = CandidateProfitEstimator.TrySelectWinner([longEstimate!, shortEstimate!],
+            out var winnerIndex, out var currenciesDiffer);
+        var tiedWinner = CandidateProfitEstimator.TrySelectWinner(
+            [longEstimate! with { NetProfit = 5m }, shortEstimate! with { NetProfit = 5m }],
+            out var tiedIndex, out _);
+        var mixedWinner = CandidateProfitEstimator.TrySelectWinner(
+            [longEstimate!, shortEstimate! with { Currency = "USD" }], out _, out var mixedCurrencies);
+        var noPositive = CandidateProfitEstimator.TrySelectWinner(
+            [longEstimate! with { NetProfit = 0m }], out var noPositiveIndex, out _);
+        check(winner && winnerIndex == 1 && !currenciesDiffer
+              && tiedWinner && tiedIndex == 0 && !mixedWinner && mixedCurrencies
+              && !noPositive && noPositiveIndex == -1,
+            "strict positive selection chooses the larger result, preserves asset order on ties, and stops on mixed currencies");
+    }
+
+    private static async Task CheckCandidateRanking(Action<bool, string> check, string root)
+    {
+        foreach (var entryType in new[] { "Market", "Limit" })
+        {
+            using var harness = new Harness(Path.Combine(root, entryType.ToLowerInvariant()), ["SOL", "ETH"],
+                entryType: entryType, selectionMethod: "NetProfitAtTakeProfit");
+            ConfigureRankingFixture(harness);
+            var started = await harness.Loop.StartAsync();
+            var result = await harness.Loop.RunOnceAsync();
+            var order = harness.Orders.Orders.SingleOrDefault();
+            var inputs = harness.Contexts.LastInputs.ToArray();
+            var status = harness.Loop.State.LastStatus ?? string.Empty;
+            var currentMarketRefreshed = entryType != "Market"
+                || inputs.LastOrDefault(input => input.Setup.Asset == "SOL")?.Pools.Single()
+                    .CurrentMarketPrice?.Value == 51m;
+            var initialMarketWinnerChanges = entryType != "Market"
+                || EstimateCandidate(inputs.First(input => input.Setup.Asset == "SOL"))
+                    > EstimateCandidate(inputs.First(input => input.Setup.Asset == "ETH"));
+            check(started.Succeeded && result.Succeeded && harness.Adapter.SubmitCount == 1
+                  && order?.Asset == "ETH" && currentMarketRefreshed && initialMarketWinnerChanges
+                  && inputs.Length == 4 && inputs.TakeLast(2).Select(input => input.EvaluatedAt).Distinct().Count() == 1
+                  && status.Contains("Выбран ETH", StringComparison.Ordinal)
+                  && status.Contains("Scenario Venue A/Scenario Account A/ETH-PERP", StringComparison.Ordinal)
+                  && status.Contains("USDC", StringComparison.Ordinal)
+                  && status.Contains("комиссия входа", StringComparison.Ordinal)
+                  && status.Contains("funding за 24 ч", StringComparison.Ordinal)
+                  && status.Contains("чистый", StringComparison.Ordinal),
+                $"{entryType} refreshes the full candidate set before transfer, reranks a changed Market price, sends one highest-net candidate, and records its route and costs (status={result.Status})");
+        }
+
+        using (var marginChanged = new Harness(Path.Combine(root, "fresh-margin"), ["SOL", "ETH"],
+                   selectionMethod: "NetProfitAtTakeProfit"))
+        {
+            ConfigureRankingFixture(marginChanged);
+            marginChanged.Contexts.AfterInitialCandidateBatch = () =>
+                marginChanged.Adapter.SetAvailableMargin(Harness.VenueA, Harness.AccountA, 1m);
+            await marginChanged.Loop.StartAsync();
+            var result = await marginChanged.Loop.RunOnceAsync();
+            check(marginChanged.Adapter.SubmitCount == 0 && marginChanged.Loop.State.PendingSetup is null
+                  && (marginChanged.Loop.State.LastStatus ?? string.Empty).Contains("обновления", StringComparison.Ordinal)
+                  && marginChanged.Loop.State.NextSearchAt.ContainsKey("SOL"),
+                $"a fresh account read that removes aggregate margin defers every ranked entry before transmission (status={result.Status})");
+        }
+
+        using (var eligibilityRecovers = new Harness(Path.Combine(root, "fresh-eligibility"), ["SOL", "ETH"],
+                   selectionMethod: "NetProfitAtTakeProfit"))
+        {
+            ConfigureRankingFixture(eligibilityRecovers);
+            eligibilityRecovers.Contexts.CandidateStopCoverageByAsset["ETH"] = 0m;
+            eligibilityRecovers.Contexts.AfterInitialCandidateBatch = () =>
+                eligibilityRecovers.Contexts.CandidateStopCoverageByAsset["ETH"] = 100m;
+            await eligibilityRecovers.Loop.StartAsync();
+            var result = await eligibilityRecovers.Loop.RunOnceAsync();
+            var status = eligibilityRecovers.Loop.State.LastStatus ?? string.Empty;
+            check(result.Succeeded && eligibilityRecovers.Orders.Orders.SingleOrDefault()?.Asset == "ETH"
+                  && eligibilityRecovers.Contexts.LastInputs.Count == 4
+                  && !eligibilityRecovers.Loop.State.NextSearchAt.ContainsKey("ETH")
+                  && status.Contains("Выбран ETH", StringComparison.Ordinal)
+                  && !status.Contains("ETH: допуск 007", StringComparison.Ordinal),
+                $"a complete AI response that initially fails 007 can enter the refreshed comparison after updated evidence, clearing stale retry and skip data (status={result.Status})");
+        }
+
+        using (var interruptedRefresh = new Harness(Path.Combine(root, "interrupted-refresh"), ["SOL", "ETH"],
+                   selectionMethod: "NetProfitAtTakeProfit"))
+        {
+            ConfigureRankingFixture(interruptedRefresh);
+            interruptedRefresh.Contexts.AfterInitialCandidateBatch = () =>
+                interruptedRefresh.Adapter.FailNextRead = true;
+            await interruptedRefresh.Loop.StartAsync();
+            var interrupted = await interruptedRefresh.Loop.RunOnceAsync();
+            var orphanedRankedPending = interruptedRefresh.Loop.State.PendingSetup is
+                { WasCandidateRanked: true, PreparedEntry: null };
+            interruptedRefresh.Clock.UtcNow = InitialTime.AddSeconds(60);
+            var freshCycle = await interruptedRefresh.Loop.RunOnceAsync();
+            check(!interrupted.Succeeded && orphanedRankedPending
+                  && freshCycle.Succeeded && interruptedRefresh.Adapter.SubmitCount == 1
+                  && interruptedRefresh.Orders.Orders.SingleOrDefault()?.Asset == "ETH"
+                  && interruptedRefresh.Ai.Requests.Count == 4
+                  && interruptedRefresh.Contexts.LastInputs.Count == 6,
+                $"an interrupted pre-transfer refresh discards its ranked pending and the next tick makes a fresh complete comparison (first={interrupted.Status}; next={freshCycle.Status}; requests={interruptedRefresh.Ai.Requests.Count}; inputs={interruptedRefresh.Contexts.LastInputs.Count})");
+        }
+
+        using (var stale = new Harness(Path.Combine(root, "stale-setup"), ["SOL", "ETH"],
+                   selectionMethod: "NetProfitAtTakeProfit"))
+        {
+            stale.Ai.Handler = request => Task.FromResult(request.Asset == "SOL"
+                ? Setup(request, stale.Clock.UtcNow, "LONG", 50m, 52m, 45m,
+                    stale.Clock.UtcNow.AddMinutes(-20))
+                : Setup(request, stale.Clock.UtcNow, "SHORT", 50m, 45m, 55m));
+            await stale.Loop.StartAsync();
+            var result = await stale.Loop.RunOnceAsync();
+            var staleRetry = stale.Loop.State.NextSearchAt.TryGetValue("SOL", out var retryAt)
+                && retryAt == InitialTime.AddSeconds(stale.Profile.Settings.RecoveryCheckSeconds);
+            check(result.Succeeded && stale.Orders.Orders.Single().Asset == "ETH"
+                  && staleRetry
+                  && result.Status.Contains("свежего времени наблюдения", StringComparison.OrdinalIgnoreCase),
+                $"a stale candidate is excluded and scheduled for the existing fresh-data retry while another candidate can win (succeeded={result.Succeeded}; order={stale.Orders.Orders.SingleOrDefault()?.Asset}; retry={stale.Loop.State.NextSearchAt.GetValueOrDefault("SOL")}; status={result.Status})");
+        }
+
+        using (var noSetup = new Harness(Path.Combine(root, "no-setup"), ["SOL", "ETH"],
+                   selectionMethod: "NetProfitAtTakeProfit"))
+        {
+            noSetup.Ai.Handler = request => Task.FromResult(request.Asset == "SOL"
+                ? NoSetup(request)
+                : Setup(request, noSetup.Clock.UtcNow, "SHORT", 50m, 45m, 55m));
+            await noSetup.Loop.StartAsync();
+            var result = await noSetup.Loop.RunOnceAsync();
+            check(result.Succeeded && noSetup.Adapter.SubmitCount == 1
+                  && noSetup.Orders.Orders.Single().Asset == "ETH"
+                  && noSetup.Loop.State.NextSearchAt["SOL"] == InitialTime.AddMinutes(noSetup.Profile.Settings.NewSetupRetryMinutes),
+                "NO_SETUP keeps its existing retry deadline while the remaining candidate is ranked");
+        }
+
+        using var ordered = new Harness(Path.Combine(root, "asset-order"), ["SOL", "ETH"]);
+        ConfigureRankingFixture(ordered);
+        await ordered.Loop.StartAsync();
+        var first = await ordered.Loop.RunOnceAsync();
+        check(first.Succeeded && ordered.Adapter.SubmitCount == 1
+              && ordered.Orders.Orders.Single().Asset == "SOL" && ordered.Ai.Requests.Count == 1,
+            "profiles without the new selection field keep the first eligible asset behavior");
+    }
+
+    private static void ConfigureRankingFixture(Harness harness)
+    {
+        harness.Contexts.CandidateStopCoverage = 100m;
+        harness.Contexts.SetMarketPrice("SOL", 45m);
+        harness.Contexts.SetMarketPriceAfterInitialEvaluation("SOL", 51m);
+        harness.Ai.Handler = request =>
+        {
+            if (request.Asset == "SOL")
+                return Task.FromResult(Setup(request, harness.Clock.UtcNow, "LONG", 50m, 52m, 35m));
+            return Task.FromResult(Setup(request, harness.Clock.UtcNow, "SHORT", 50m, 45m, 55m));
+        };
+    }
+
+    private static decimal EstimateCandidate(EntryEligibilityInput input)
+    {
+        var eligibility = EntryEligibilityEvaluator.Evaluate(input);
+        var pool = eligibility.SelectedPool ?? throw new InvalidOperationException(
+            $"Candidate fixture did not pass 007: {eligibility.Status}; {string.Join(" ", eligibility.Reasons)}");
+        var source = input.Pools.Single(item => item.Account.Venue == pool.Venue
+            && item.Account.Account == pool.Account);
+        var instrument = source.Instruments.Single(item => item.Identity.Contract == pool.Contract);
+        if (!CandidateProfitEstimator.TryCalculate(input.Setup, pool.QuoteCurrency, pool.EntryPrice,
+                pool.Quantity, pool.BaseQuantity, instrument, out var estimate, out _) || estimate is null)
+            throw new InvalidOperationException("Candidate fixture did not have complete profit inputs.");
+        return estimate.NetProfit;
+    }
+
+    private static async Task CheckCandidateCollectionDeadline(Action<bool, string> check, string root)
+    {
+        var delayStarted = new TaskCompletionSource<TimeSpan>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseDeadline = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        async Task Delay(TimeSpan duration, CancellationToken cancellationToken)
+        {
+            delayStarted.TrySetResult(duration);
+            await releaseDeadline.Task.WaitAsync(cancellationToken);
+        }
+
+        using var harness = new Harness(root, ["SOL", "ETH"], selectionMethod: "NetProfitAtTakeProfit",
+            delay: Delay);
+        var requestCount = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var started = 0;
+        var cancelled = 0;
+        harness.Ai.CancellationHandler = (request, cancellationToken) =>
+        {
+            var response = new TaskCompletionSource<AiSourceResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
+            cancellationToken.Register(() =>
+            {
+                Interlocked.Increment(ref cancelled);
+                response.TrySetCanceled(cancellationToken);
+            });
+            if (Interlocked.Increment(ref started) == 2)
+                requestCount.TrySetResult();
+            return response.Task;
+        };
+        await harness.Loop.StartAsync();
+        var cycle = harness.Loop.RunOnceAsync();
+        var delayWindow = await delayStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await requestCount.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        harness.Clock.UtcNow = InitialTime.AddMinutes(2);
+        releaseDeadline.TrySetResult();
+        var result = await cycle.WaitAsync(TimeSpan.FromSeconds(5));
+        check(delayWindow == TimeSpan.FromMinutes(2) && harness.Adapter.SubmitCount == 0
+              && cancelled == 2 && harness.Loop.State.PendingSetup is null
+              && harness.Loop.State.NextSearchAt.Keys.OrderBy(value => value, StringComparer.Ordinal)
+                  .SequenceEqual(["ETH", "SOL"])
+              && !result.Status.Contains("Выбран", StringComparison.Ordinal),
+            $"two-minute collection cancels both late synthetic AI calls and leaves no entry candidate (status={result.Status}; cancelled={cancelled})");
+    }
+
+    private static async Task CheckUncooperativeCandidateCancellation(Action<bool, string> check, string root)
+    {
+        var delayStarted = new TaskCompletionSource<TimeSpan>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseDeadline = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        async Task Delay(TimeSpan duration, CancellationToken cancellationToken)
+        {
+            delayStarted.TrySetResult(duration);
+            await releaseDeadline.Task.WaitAsync(cancellationToken);
+        }
+
+        using var harness = new Harness(root, ["SOL", "ETH"], selectionMethod: "NetProfitAtTakeProfit",
+            delay: Delay);
+        ConfigureRankingFixture(harness);
+        var hangingResponse = new TaskCompletionSource<AiSourceResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondRequestStarted = new TaskCompletionSource<AiAnalysisRequest>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cancellationObserved = 0;
+        harness.Ai.CancellationHandler = (request, cancellationToken) =>
+        {
+            if (request.Asset == "SOL")
+                return Task.FromResult(Setup(request, harness.Clock.UtcNow, "LONG", 50m, 52m, 35m));
+            cancellationToken.Register(() => Interlocked.Increment(ref cancellationObserved));
+            secondRequestStarted.TrySetResult(request);
+            return hangingResponse.Task;
+        };
+
+        await harness.Loop.StartAsync();
+        var firstCycle = harness.Loop.RunOnceAsync();
+        var deadline = await delayStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var hangingRequest = await secondRequestStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        releaseDeadline.TrySetResult();
+        var first = await firstCycle.WaitAsync(TimeSpan.FromSeconds(5));
+        var firstOrder = harness.Orders.Orders.SingleOrDefault();
+
+        var assetOrderProfile = harness.Loop.Profile.Copy();
+        assetOrderProfile.Settings.CandidateSelectionMethod = "AssetOrder";
+        var switchedToAssetOrder = await harness.Loop.UpdateProfileAsync(assetOrderProfile);
+        var rankedRetryDue = harness.Loop.State.NextSearchAt.GetValueOrDefault("ETH");
+        harness.Clock.UtcNow = rankedRetryDue;
+        var second = await harness.Loop.RunOnceAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        var stopped = await harness.Loop.StopAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        var requestCount = harness.Ai.Requests.Count;
+        hangingResponse.TrySetResult(Setup(hangingRequest, harness.Clock.UtcNow, "SHORT", 50m, 45m, 55m));
+
+        check(deadline == TimeSpan.FromMinutes(2) && first.Succeeded && firstOrder?.Asset == "SOL"
+              && cancellationObserved == 1 && harness.Adapter.SubmitCount == 1
+              && switchedToAssetOrder && rankedRetryDue > InitialTime
+              && requestCount == 2
+              && second.Status.Contains("Предыдущий запрос AI после отмены", StringComparison.Ordinal)
+              && stopped.Succeeded,
+            $"a fast candidate remains usable at the deadline; an AI task ignoring cancellation cannot delay Stop or overlap a due AssetOrder search after a settings switch (second={second.Status}; canceled={cancellationObserved}; requests={requestCount})");
+    }
+
+    private static async Task CheckCandidateRankingCancellation(Action<bool, string> check, string root)
+    {
+        foreach (var action in new[] { "Stop", "Test", "exit" })
+        {
+            using var harness = new Harness(Path.Combine(root, "ranking-cancel-" + action), ["SOL", "ETH"],
+                selectionMethod: "NetProfitAtTakeProfit");
+            var requestCount = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var started = 0;
+            var cancelled = 0;
+            harness.Ai.CancellationHandler = (request, cancellationToken) =>
+            {
+                var response = new TaskCompletionSource<AiSourceResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
+                cancellationToken.Register(() =>
+                {
+                    Interlocked.Increment(ref cancelled);
+                    response.TrySetCanceled(cancellationToken);
+                });
+                if (Interlocked.Increment(ref started) == 2)
+                    requestCount.TrySetResult();
+                return response.Task;
+            };
+            await harness.Loop.StartAsync();
+            var cycle = harness.Loop.RunOnceAsync();
+            await requestCount.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Task control = action switch
+            {
+                "Stop" => harness.Loop.StopAsync(),
+                "Test" => harness.Loop.UpdateProfileAsync(new SettingsProfile
+                {
+                    Settings = harness.Profile.Settings.Copy(),
+                    SelectedMode = "Test",
+                    SavedOperatingIntent = false
+                }),
+                _ => harness.Loop.HoldAdmissionForExitAsync()
+            };
+            var both = Task.WhenAll(cycle, control);
+            await both.WaitAsync(TimeSpan.FromSeconds(5));
+            check(cancelled == 2 && harness.Adapter.SubmitCount == 0
+                  && harness.Loop.State.PendingSetup is null,
+                $"{action} cancels the in-flight candidate collection before any entry is transmitted (cancelled={cancelled})");
+        }
     }
 
     private static async Task CheckLocalScenarioJourney(Action<bool, string> check, string root)
@@ -549,6 +907,7 @@ internal static class TradingLoopChecks
     {
         var root = Path.Combine(fixtureRoot, "trading-loop-local-window");
         var profile = LocalScenarioProfile("Limit");
+        profile.Settings.CandidateSelectionMethod = "NetProfitAtTakeProfit";
         profile.Settings.PreventSleep = true;
         var settingsStore = new SettingsStore(Path.Combine(root, "app-settings.json"));
         check(settingsStore.Save(profile).Succeeded, "WPF local-loop fixture saves a complete application profile");
@@ -594,6 +953,7 @@ internal static class TradingLoopChecks
             var stop = Get<Button>(window, "LocalScenarioStopButton");
             var closePosition = Get<Button>(window, "LocalScenarioClosePositionButton");
             var scroll = Get<ScrollViewer>(window, "MainScrollViewer");
+            var selectionMethod = Get<ComboBox>(window, "CandidateSelectionMethodComboBox");
             var signIn = Get<Button>(window, "OpenTrueNorthButton");
             var checkSession = Get<Button>(window, "CheckTrueNorthSessionButton");
             check(Get<TextBlock>(window, "LocalScenarioPauseText").Text.Contains("намерение Stop", StringComparison.Ordinal)
@@ -601,15 +961,45 @@ internal static class TradingLoopChecks
                   && Get<TextBlock>(window, "LocalScenarioActivityText").Text.Contains("остановлен", StringComparison.Ordinal)
                   && Get<TextBlock>(window, "OperatingStatusText").Text.Contains("ОСТАНОВЛЕН", StringComparison.Ordinal)
                   && Get<TextBlock>(window, "CurrentModeText").Text == "TrueNorth AI setups"
+                  && selectionMethod.SelectedIndex == 1
                   && localScenario.SettingsPath.StartsWith(Path.Combine(localScenario.RootPath, "profile"), StringComparison.OrdinalIgnoreCase),
-                "overview separates the selected mode from the labelled, isolated local scenario");
+                "overview separates the selected mode from the labelled, isolated local scenario, preserving ranking settings");
+            var settingsNavigation = Get<ListBox>(window, "NavigationList");
+            settingsNavigation.SelectedIndex = 1;
+            window.UpdateLayout();
+            PumpDispatcher(application.Dispatcher);
+            selectionMethod.SelectedIndex = 0;
+            InvokeAutomation(Get<Button>(window, "SaveSettingsButton"));
+            PumpUntil(() => settingsStore.Load().Profile.Settings.CandidateSelectionMethod == "AssetOrder"
+                && localScenario.Loop.Profile.Settings.CandidateSelectionMethod == "AssetOrder", application,
+                "asset-order selection persisted to both profiles");
+            check(selectionMethod.SelectedIndex == 0
+                  && settingsStore.Load().Profile.Settings.CandidateSelectionMethod == "AssetOrder"
+                  && localScenario.Loop.Profile.Settings.CandidateSelectionMethod == "AssetOrder",
+                "settings save the legacy asset-order method to both ordinary and local profiles");
+            selectionMethod.SelectedIndex = 1;
+            InvokeAutomation(Get<Button>(window, "SaveSettingsButton"));
+            PumpUntil(() => settingsStore.Load().Profile.Settings.CandidateSelectionMethod == "NetProfitAtTakeProfit"
+                && localScenario.Loop.Profile.Settings.CandidateSelectionMethod == "NetProfitAtTakeProfit", application,
+                "ranking selection persisted to both profiles");
+            RenderWindow(window, Path.Combine(artifactDirectory, "candidate-selection-760x560.png"));
+            check(selectionMethod.SelectedIndex == 1
+                  && (selectionMethod.SelectedItem as ComboBoxItem)?.Content?.ToString() == "Чистая прибыль"
+                  && Get<TextBlock>(window, "CandidateSelectionMethodHelpText").Text.Contains("TP", StringComparison.Ordinal)
+                  && localScenario.Loop.Profile.Settings.CandidateSelectionMethod == "NetProfitAtTakeProfit",
+                "the ranking choice survives saving and is visible in the settings screen");
+            ordinaryProfileBytes = File.ReadAllBytes(settingsStore.PathName);
+            settingsNavigation.SelectedIndex = 0;
+            window.UpdateLayout();
+            PumpDispatcher(application.Dispatcher);
             var review = Get<Expander>(window, "LocalScenarioProfileReview");
             check(AutomationProperties.GetName(review).Length > 0
                   && Get<TextBlock>(window, "LocalScenarioProfileReviewText").Text.Contains("SOL", StringComparison.Ordinal)
                   && Get<TextBlock>(window, "LocalScenarioProfileReviewText").Text.Contains("Limit", StringComparison.Ordinal)
                   && Get<TextBlock>(window, "LocalScenarioProfileReviewText").Text.Contains("10%", StringComparison.Ordinal)
-                  && Get<TextBlock>(window, "LocalScenarioProfileReviewText").Text.Contains("×1", StringComparison.Ordinal),
-                "accessible profile review shows saved mode, assets, entry type, size and leverage before local Start");
+                  && Get<TextBlock>(window, "LocalScenarioProfileReviewText").Text.Contains("×1", StringComparison.Ordinal)
+                  && Get<TextBlock>(window, "LocalScenarioProfileReviewText").Text.Contains("чистый результат на TP", StringComparison.Ordinal),
+                "accessible profile review shows saved selection method, mode, assets, entry type, size and leverage before local Start");
             check(realStart.IsTabStop && localStart.IsTabStop && stop.IsTabStop
                   && AutomationProperties.GetName(realStart).Length > 0
                   && AutomationProperties.GetName(localStart).Length > 0
@@ -661,6 +1051,11 @@ internal static class TradingLoopChecks
                   && localScenario.SyntheticOpenOrders.Count == 1 && wakeProtection.IsRequestHeld
                   && powerRequests.Contains(true),
                 "local Start runs the same synthetic cycle and requests wake protection for its owned position");
+            check(Get<TextBlock>(window, "LocalScenarioStatusText").Text.Contains("Способ: чистый результат на TP", StringComparison.Ordinal)
+                  && Get<TextBlock>(window, "LocalScenarioStatusText").Text.Contains("маршрут", StringComparison.Ordinal)
+                  && Get<TextBlock>(window, "LocalScenarioStatusText").Text.Contains("USDC", StringComparison.Ordinal)
+                  && Get<TextBlock>(window, "LocalScenarioStatusText").Text.Contains("чистый", StringComparison.Ordinal),
+                "local-cycle status exposes the ranking calculation, selected route, currency and net estimate");
             check(Get<Button>(window, "LocalScenarioClosePositionButton").Visibility == Visibility.Visible
                   && Get<TextBlock>(window, "OperatingStatusText").Text.Contains("СОПРОВОЖДЕНИЕ", StringComparison.Ordinal)
                   && Get<TextBlock>(window, "LocalScenarioActivityText").Text.Contains("Сопровождение", StringComparison.Ordinal),
@@ -1345,6 +1740,18 @@ internal static class TradingLoopChecks
         await harness.Loop.RunOnceAsync();
         check(harness.Adapter.SubmitCount == 1 && harness.Ai.Requests.Count == 1,
             "restart reconciles an unknown outcome instead of repeating its risky action");
+
+        using var ranked = new Harness(Path.Combine(root, "candidate-ranking"), ["SOL"],
+            selectionMethod: "NetProfitAtTakeProfit");
+        ranked.Adapter.EntryOutcome = RecoveryOperationOutcome.Unknown;
+        ranked.Ai.Handler = request => Task.FromResult(Setup(request, ranked.Clock.UtcNow));
+        await ranked.Loop.StartAsync();
+        await ranked.Loop.RunOnceAsync();
+        await ranked.RestartAsync();
+        await ranked.Loop.RunOnceAsync();
+        check(ranked.Adapter.SubmitCount == 1 && ranked.Ai.Requests.Count == 1
+              && ranked.Recovery.State.Operations.Any(operation => operation.Stage == RecoveryOperationStage.Unknown),
+            "candidate ranking also reconciles the saved IntentId after restart without repeating an unknown entry");
     }
 
     private static async Task CheckTransferFence(Action<bool, string> check, string root)
@@ -1920,17 +2327,27 @@ internal static class TradingLoopChecks
     }
 
     private static AiSourceResponse Setup(AiAnalysisRequest request, DateTimeOffset now) =>
+        Setup(request, now, "LONG", 50m, 55m, 45m);
+
+    private static AiSourceResponse Setup(
+        AiAnalysisRequest request,
+        DateTimeOffset now,
+        string side,
+        decimal referencePrice,
+        decimal takeProfit,
+        decimal stopLoss,
+        DateTimeOffset? referenceAt = null) =>
         new(request.Id, JsonSerializer.Serialize(new
         {
             status = "SETUP",
             market = request.Market,
             order_type = request.OrderType,
-            side = "LONG",
-            reference_price = 50m,
-            reference_time_utc = now.AddSeconds(-10).ToString("O", CultureInfo.InvariantCulture),
-            entry_price = request.OrderType == "MARKET" ? (decimal?)null : 50m,
-            take_profit = 55m,
-            stop_loss = 45m,
+            side,
+            reference_price = referencePrice,
+            reference_time_utc = (referenceAt ?? now.AddSeconds(-10)).ToString("O", CultureInfo.InvariantCulture),
+            entry_price = request.OrderType == "MARKET" ? (decimal?)null : referencePrice,
+            take_profit = takeProfit,
+            stop_loss = stopLoss,
             reason = "синтетический тест",
             invalidation = "синтетическое условие"
         }), true);
@@ -1961,18 +2378,22 @@ internal static class TradingLoopChecks
         private readonly string _root;
         private readonly string _settingsPath;
         private readonly string _journalPath;
+        private readonly Func<TimeSpan, CancellationToken, Task>? _delay;
 
         internal Harness(
             string root,
             IReadOnlyList<string> assets,
             decimal availableMargin = 1000m,
             int recoveryCheckSeconds = 60,
-            string entryType = "Market")
+            string entryType = "Market",
+            string selectionMethod = "AssetOrder",
+            Func<TimeSpan, CancellationToken, Task>? delay = null)
         {
             _root = Path.GetFullPath(root);
             Directory.CreateDirectory(_root);
             _settingsPath = Path.Combine(_root, "settings.json");
             _journalPath = Path.Combine(_root, "recovery-state.json");
+            _delay = delay;
             Clock = new FakeClock(InitialTime);
             Profile = new SettingsProfile
             {
@@ -1981,6 +2402,7 @@ internal static class TradingLoopChecks
                 {
                     Assets = assets.Cast<string?>().ToList(),
                     EntryType = entryType,
+                    CandidateSelectionMethod = selectionMethod,
                     MarginBalancePercent = 10m,
                     Leverage = 1m,
                     RecoveryCheckSeconds = recoveryCheckSeconds
@@ -2056,7 +2478,7 @@ internal static class TradingLoopChecks
             Loop = CreateLoop();
         }
 
-        private TradingLoopCoordinator CreateLoop() => new(SettingsStore, Profile, Recovery, Orders, Ai, Contexts, Clock);
+        private TradingLoopCoordinator CreateLoop() => new(SettingsStore, Profile, Recovery, Orders, Ai, Contexts, Clock, _delay);
 
         public void Dispose()
         {
@@ -2071,6 +2493,7 @@ internal static class TradingLoopChecks
     private sealed class FixtureAi(FakeClock clock) : IAiAnalysisSource, ITradingLoopReassessmentSource,
         ITradingLoopLimitReassessmentSource
     {
+        private readonly object _requestGate = new();
         private TaskCompletionSource<AiAnalysisRequest>? _started;
         private TaskCompletionSource<AiSourceResponse>? _release;
         private TaskCompletionSource<LimitReassessmentContext>? _limitStarted;
@@ -2079,6 +2502,7 @@ internal static class TradingLoopChecks
         internal readonly List<TradingLoopReassessmentContext> Reassessments = [];
         internal readonly List<LimitReassessmentContext> LimitReassessments = [];
         internal Func<AiAnalysisRequest, Task<AiSourceResponse>> Handler = request => Task.FromResult(NoSetup(request));
+        internal Func<AiAnalysisRequest, CancellationToken, Task<AiSourceResponse>>? CancellationHandler { get; set; }
         internal Func<LimitReassessmentContext, Task<LimitReassessmentResult>> LimitHandler = context =>
             Task.FromResult(LimitResult(context, LimitReassessmentOutcome.Inconclusive));
         internal TaskCompletionSource<AiAnalysisRequest> RequestStarted => _started
@@ -2109,13 +2533,14 @@ internal static class TradingLoopChecks
 
         public Task<AiSourceResponse> AnalyzeAsync(AiAnalysisRequest request, CancellationToken cancellationToken)
         {
-            Requests.Add(request);
+            lock (_requestGate)
+                Requests.Add(request);
             if (_release is not null)
             {
                 _started!.TrySetResult(request);
                 return _release.Task;
             }
-            return Handler(request);
+            return CancellationHandler?.Invoke(request, cancellationToken) ?? Handler(request);
         }
 
         public Task<AiSourceResponse> ReassessAsync(
@@ -2124,7 +2549,8 @@ internal static class TradingLoopChecks
         {
             cancellationToken.ThrowIfCancellationRequested();
             Reassessments.Add(context);
-            Requests.Add(context.Request);
+            lock (_requestGate)
+                Requests.Add(context.Request);
             return Handler(context.Request);
         }
 
@@ -2145,13 +2571,24 @@ internal static class TradingLoopChecks
     private sealed class FixtureContextSource(IReadOnlyList<TradingLoopRoute> routes) : ITradingLoopContextSource
     {
         private readonly List<TradingLoopRoute> _routes = routes.ToList();
+        private readonly HashSet<string> _initialCandidateAssets = new(StringComparer.Ordinal);
+        private bool _initialCandidateBatchCompleted;
         internal IReadOnlyList<TradingLoopRoute> Routes => _routes;
         internal bool ExposureCovered { get; set; } = true;
         internal bool? MinimumEntryAffordable { get; set; } = true;
         internal HashSet<TradingLoopRoute> UnavailableRoutes { get; } = [];
         internal EntryEligibilityInput? LastInput { get; private set; }
+        internal List<EntryEligibilityInput> LastInputs { get; } = [];
+        internal Dictionary<string, decimal> MarketPrices { get; } = new(StringComparer.Ordinal);
+        internal Dictionary<string, decimal> MarketPricesAfterInitialEvaluation { get; } = new(StringComparer.Ordinal);
+        internal Dictionary<string, decimal> CandidateStopCoverageByAsset { get; } = new(StringComparer.Ordinal);
+        internal Action? AfterInitialCandidateBatch { get; set; }
+        internal decimal CandidateStopCoverage { get; set; } = 20m;
 
         internal void AddRoute(TradingLoopRoute route) => _routes.Add(route);
+        internal void SetMarketPrice(string asset, decimal price) => MarketPrices[asset] = price;
+        internal void SetMarketPriceAfterInitialEvaluation(string asset, decimal price) =>
+            MarketPricesAfterInitialEvaluation[asset] = price;
 
         public IReadOnlyList<TradingLoopRoute> GetRoutes(SettingsProfile profile) => _routes.ToArray();
 
@@ -2170,6 +2607,8 @@ internal static class TradingLoopChecks
                     Reason: available ? null : "Синтетический маршрут недоступен.",
                     MinimumEntryAffordable: MinimumEntryAffordable));
 
+            var candidateStopCoverage = CandidateStopCoverageByAsset.TryGetValue(setup.Asset!, out var coverage)
+                ? coverage : CandidateStopCoverage;
             var example = EntryEligibilityExample.Create();
             var marketAt = now.AddSeconds(-2);
             var pools = new List<RiskPoolInput>();
@@ -2180,9 +2619,8 @@ internal static class TradingLoopChecks
                     continue;
                 var routeForAccount = _routes.FirstOrDefault(candidate => candidate.Asset == setup.Asset
                     && candidate.Venue == account.Venue && candidate.Account == account.Account);
-                var contract = routeForAccount?.Contract
-                    ?? template.Instruments.FirstOrDefault(instrument => instrument.Identity.BaseAsset == setup.Asset)
-                        ?.Identity.Contract;
+                var instrumentExample = template.Instruments.FirstOrDefault(instrument => instrument.Identity.BaseAsset == setup.Asset);
+                var contract = routeForAccount?.Contract ?? instrumentExample?.Identity.Contract;
                 if (string.IsNullOrWhiteSpace(contract))
                     continue;
 
@@ -2201,11 +2639,17 @@ internal static class TradingLoopChecks
                     SetupBinding = new RiskSetupMarketBinding(account.Venue, contract, setup.Asset,
                         setup.Market, "local fixture", now.AddSeconds(-2)),
                     CurrentMarketPrice = setup.EntryType == "Market"
-                        ? EntryEligibilityExample.Evidence(50m, "USDC/" + setup.Asset, marketAt, contract) : null,
+                        ? EntryEligibilityExample.Evidence(
+                            MarketPricesAfterInitialEvaluation.TryGetValue(setup.Asset!, out var refreshedPrice)
+                                && _initialCandidateBatchCompleted
+                                ? refreshedPrice
+                                : MarketPrices.TryGetValue(setup.Asset!, out var marketPrice) ? marketPrice : 50m,
+                            "USDC/" + setup.Asset, marketAt, contract) : null,
                     VerifiedLimitPrice = setup.EntryType == "Limit"
                         ? EntryEligibilityExample.Evidence(setup.LimitPrice!.Value, "USDC/" + setup.Asset,
                             marketAt, contract) : null,
-                    CandidateStopCoveredBaseQuantity = Refresh(template.CandidateStopCoveredBaseQuantity, now),
+                    CandidateStopCoveredBaseQuantity = EntryEligibilityExample.Evidence(
+                        candidateStopCoverage, setup.Asset!, now.AddSeconds(-2), contract),
                     AvailableMarginIncludesOrderReserves = Refresh(template.AvailableMarginIncludesOrderReserves, now),
                     OtherUnreservedRequirements = Refresh(template.OtherUnreservedRequirements, now),
                     AdditionalMaintenanceHeadroom = Refresh(template.AdditionalMaintenanceHeadroom, now)
@@ -2222,6 +2666,17 @@ internal static class TradingLoopChecks
                     now.AddSeconds(-5))
             };
             LastInput = input;
+            LastInputs.Add(input);
+            if (setup is not null && _routes.LastOrDefault(candidate => candidate.Asset == setup.Asset) == route)
+            {
+                _initialCandidateAssets.Add(setup.Asset!);
+                if (!_initialCandidateBatchCompleted && _initialCandidateAssets.Count
+                        == _routes.Select(candidate => candidate.Asset).Distinct(StringComparer.Ordinal).Count())
+                {
+                    _initialCandidateBatchCompleted = true;
+                    AfterInitialCandidateBatch?.Invoke();
+                }
+            }
             return Task.FromResult(new TradingLoopContext(available, ExposureCovered, input,
                 available ? null : "Синтетический маршрут недоступен.", MinimumEntryAffordable));
         }
@@ -2242,6 +2697,7 @@ internal static class TradingLoopChecks
         internal bool DurableTransferSeenBeforeEveryCallback { get; private set; } = true;
         internal bool PreparedEntrySavedBeforeEntryTransfer { get; private set; } = true;
         internal Exception? ReadFailure { get; set; }
+        internal bool FailNextRead { get; set; }
         internal decimal? EntryFilledQuantity { get; set; }
         internal decimal? FillDuringCancel { get; set; }
         internal List<string> Trace { get; } = [];
@@ -2275,6 +2731,11 @@ internal static class TradingLoopChecks
         public Task<RecoverySnapshotRead> ReadAsync(string venue, string account, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (FailNextRead)
+            {
+                FailNextRead = false;
+                throw new IOException("fixed transient account read failure");
+            }
             if (ReadFailure is not null)
                 throw ReadFailure;
             var fixture = _accounts[(venue, account)];

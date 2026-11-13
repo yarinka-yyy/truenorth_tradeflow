@@ -819,6 +819,8 @@ public partial class MainWindow : Window
             LocalScenarioCard.Visibility = _localScenarioUnavailableReason is null
                 ? Visibility.Collapsed : Visibility.Visible;
             LocalScenarioActivityText.Text = "Локальный цикл не подключён.";
+            LocalScenarioStatusText.Text = string.Empty;
+            LocalScenarioStatusText.Visibility = Visibility.Collapsed;
             LocalScenarioPauseText.Text = _localScenarioUnavailableReason
                 ?? "Локальный сценарий недоступен в этой конфигурации окна.";
             LocalScenarioProfileReviewText.Text = "Отдельный сохранённый профиль не загружен.";
@@ -836,6 +838,9 @@ public partial class MainWindow : Window
         LocalScenarioCard.Visibility = Visibility.Visible;
         var state = _localTradingScenario.Snapshot();
         LocalScenarioActivityText.Text = state.Activity;
+        LocalScenarioStatusText.Text = state.LastStatus;
+        LocalScenarioStatusText.Visibility = string.IsNullOrWhiteSpace(state.LastStatus)
+            ? Visibility.Collapsed : Visibility.Visible;
         LocalScenarioPauseText.Text = state.PauseReason;
         LocalScenarioProfileReviewText.Text = state.ProfileReview;
         OperatingStatusText.Text = state.IsSearching ? "ЛОКАЛЬНЫЙ ПОИСК"
@@ -899,6 +904,11 @@ public partial class MainWindow : Window
         {
             "Market" => 1,
             "Limit" => 2,
+            _ => 0
+        };
+        CandidateSelectionMethodComboBox.SelectedIndex = settings.CandidateSelectionMethod switch
+        {
+            "NetProfitAtTakeProfit" => 1,
             _ => 0
         };
         MarginPercentTextBox.Text = FormatDecimal(settings.MarginBalancePercent);
@@ -1099,6 +1109,8 @@ public partial class MainWindow : Window
         {
             Assets = _assetRows.Select(row => (string?)row.Text).ToList(),
             EntryType = (EntryTypeComboBox.SelectedItem as ComboBoxItem)?.Tag as string,
+            CandidateSelectionMethod = (CandidateSelectionMethodComboBox.SelectedItem as ComboBoxItem)?.Tag as string
+                ?? "",
             MarginBalancePercent = ParseOptionalDecimal(MarginPercentTextBox, nameof(AppSettings.MarginBalancePercent), parseErrors),
             Leverage = ParseOptionalDecimal(LeverageTextBox, nameof(AppSettings.Leverage), parseErrors),
             PositionCheckMinutes = ParseInteger(PositionCheckMinutesTextBox, nameof(AppSettings.PositionCheckMinutes), parseErrors),
@@ -1282,6 +1294,7 @@ public partial class MainWindow : Window
     {
         SetError(AssetsErrorText, errors, nameof(AppSettings.Assets));
         SetError(EntryTypeErrorText, errors, nameof(AppSettings.EntryType));
+        SetError(CandidateSelectionMethodErrorText, errors, nameof(AppSettings.CandidateSelectionMethod));
         SetError(MarginPercentErrorText, errors, nameof(AppSettings.MarginBalancePercent));
         SetError(LeverageErrorText, errors, nameof(AppSettings.Leverage));
         SetError(PositionCheckMinutesErrorText, errors, nameof(AppSettings.PositionCheckMinutes));

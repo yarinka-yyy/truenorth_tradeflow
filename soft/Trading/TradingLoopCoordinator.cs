@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Diagnostics;
 using System.IO;
 using TrueNorth.TradeFlow;
 using TrueNorth.TradeFlow.Account;
@@ -45,17 +46,47 @@ internal interface ITradingLoopContextSource
 
 internal sealed record TradingLoopOutcome(bool Succeeded, string Status, string? Asset = null, string? IntentId = null);
 
+internal sealed record TradingLoopSearchResult(
+    TradingLoopRoute Route,
+    AiAnalysisRequest? Request,
+    AiSourceResponse? Response,
+    AiParsedFields? Fields,
+    DateTimeOffset? ReceivedAt,
+    string? Failure,
+    string? FailureSummary,
+    bool IsNoSetup,
+    bool Cancelled,
+    bool ReceivedBeforeDeadline = true);
+
 internal sealed class TradingLoopCoordinator
 {
+    private sealed record RankedCandidate(
+        TradingLoopSearchResult Search,
+        EntryEligibilitySetup Setup,
+        EntryEligibilityInput Input,
+        AccountSnapshot[] Accounts,
+        TradingLoopRoute Route,
+        EntryEligibilityResult Eligibility,
+        EntryPoolResult Pool,
+        CandidateProfitEstimate Estimate);
+
+    private sealed record RankingSnapshot(
+        IReadOnlyList<TradingLoopSearchResult> Searches,
+        IReadOnlyList<RankedCandidate> Candidates,
+        RankedCandidate Winner,
+        IReadOnlyList<string> CollectionSkipped);
+
     private static readonly TimeSpan PendingSetupLifetime = TimeSpan.FromHours(24);
     private static readonly TimeSpan PendingEligibilityRetryMinimum = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan PendingEligibilityRetryMaximum = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan CandidateCollectionLimit = TimeSpan.FromMinutes(2);
     private readonly SettingsStore _settingsStore;
     private readonly RecoveryCoordinator _recovery;
     private readonly OrderLifecycleCoordinator _orders;
     private readonly IAiAnalysisSource _analysis;
     private readonly ITradingLoopContextSource _contexts;
     private readonly IRecoveryClock _clock;
+    private readonly Func<TimeSpan, CancellationToken, Task> _delay;
     private readonly SemaphoreSlim _commandGate = new(1, 1);
     private readonly SemaphoreSlim _cycleGate = new(1, 1);
     private readonly object _activeCycleGate = new();
@@ -66,6 +97,7 @@ internal sealed class TradingLoopCoordinator
     private int _profileUpdateInProgress;
     private int _stopInProgress;
     private int _exitHold;
+    private int _outstandingCandidateRequests;
     private bool _pendingSetupLoadedAtStartup;
     private string? _lastStatus;
 
@@ -76,7 +108,8 @@ internal sealed class TradingLoopCoordinator
         OrderLifecycleCoordinator orders,
         IAiAnalysisSource analysis,
         ITradingLoopContextSource contexts,
-        IRecoveryClock clock)
+        IRecoveryClock clock,
+        Func<TimeSpan, CancellationToken, Task>? delay = null)
     {
         _settingsStore = settingsStore;
         _profile = SettingsValidator.Validate(profile).Profile;
@@ -85,6 +118,7 @@ internal sealed class TradingLoopCoordinator
         _analysis = analysis;
         _contexts = contexts;
         _clock = clock;
+        _delay = delay ?? Task.Delay;
         _state = recovery.TradingLoopState;
         _pendingSetupLoadedAtStartup = _state.PendingSetup is not null;
         _lastStatus = _state.LastStatus;
@@ -404,6 +438,17 @@ internal sealed class TradingLoopCoordinator
             if (linkedOrder is { } linkResult)
                 return linkResult;
 
+            if (_state.PendingSetup is { WasCandidateRanked: true })
+            {
+                if (!await SaveLoopStateAsync(_state with
+                    {
+                        PendingSetup = null,
+                        LastStatus = "Сохранённый выбор по прибыли без текущего набора сброшен; требуется новый набор кандидатов."
+                    }, CancellationToken.None).ConfigureAwait(false))
+                    return SetStatus(false, "Выбор по прибыли без текущего набора не удалось закрыть в журнале.");
+                _pendingSetupLoadedAtStartup = false;
+            }
+
             var expiredCandidate = await DropExpiredCandidateAsync(cycle.Token).ConfigureAwait(false);
             if (expiredCandidate is { } expired)
                 return expired;
@@ -459,6 +504,10 @@ internal sealed class TradingLoopCoordinator
                 return await ProcessPendingSetupAsync(routes, accounts, contextReads, profile, cycle.Token)
                     .ConfigureAwait(false);
 
+            if (profile.Settings.CandidateSelectionMethod == "NetProfitAtTakeProfit")
+                return await RunRankedCycleAsync(routes, accounts, contextReads, profile, cycle.Token)
+                    .ConfigureAwait(false);
+
             var insufficientFunds = false;
             var confirmedMinimumShortfall = false;
             var accountUnavailable = false;
@@ -510,6 +559,11 @@ internal sealed class TradingLoopCoordinator
 
                 if (queryRoute is null)
                     continue;
+
+                if (HasOutstandingCandidateRequests)
+                    return await SaveRankingStatusAsync(
+                        "Предыдущий запрос AI после отмены ещё не завершился; новый поиск отложен.",
+                        queryRoute.Asset, cycle.Token).ConfigureAwait(false);
 
                 var result = await SearchAssetAsync(queryRoute, routes, profile, cycle.Token)
                     .ConfigureAwait(false);
@@ -793,9 +847,11 @@ internal sealed class TradingLoopCoordinator
             {
                 PendingSetup = null,
                 LimitReassessments = limitReassessments,
-                LastStatus = order.ManagementMode == ManagedOrderManagementMode.Application
-                    ? "Заявка после перезапуска связана по точному IntentId и маршруту."
-                    : "Заявка передана владельцу; автоматическая переоценка отключена."
+                LastStatus = (pending.CandidateRankingSummary is { } ranking
+                    ? ranking + " " : string.Empty)
+                    + (order.ManagementMode == ManagedOrderManagementMode.Application
+                        ? "Заявка после перезапуска связана по точному IntentId и маршруту."
+                        : "Заявка передана владельцу; автоматическая переоценка отключена.")
             }, cancellationToken).ConfigureAwait(false))
             return SetStatus(false, "Связь исходного ответа и заявки не удалось сохранить.", pending.Request.Asset,
                 order.IntentId);
@@ -1541,49 +1597,21 @@ internal sealed class TradingLoopCoordinator
         SettingsProfile profile,
         CancellationToken cancellationToken)
     {
-        if (!_admission.IsAdmitting || !profile.SavedOperatingIntent
-            || profile.SelectedMode != "TrueNorth AI setups"
-            || !_recovery.IsEntryAllowed(route.Venue, profile.SavedOperatingIntent))
-            return SetStatus(false, "Новые входы закрыты перед запросом AI.", route.Asset);
-
-        if (!AiAnalysisRequestFactory.TryCreateBatch(route.Asset, profile.Settings.EntryType,
-                out var requests, out var requestError) || requests.Count != 1)
-            return SetStatus(false, requestError, route.Asset);
-        var request = requests[0];
-
-        AiSourceResponse response;
-        try
-        {
-            response = await _analysis.AnalyzeAsync(request, cancellationToken).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            return SetStatus(false, "Запрос AI отменён; ответ не может создать вход.", route.Asset);
-        }
-        catch (Exception exception)
-        {
-            return await FailAssetAsync(route.Asset, "Анализ AI завершился ошибкой ("
-                + SafeFailureKind(exception) + ").",
-                "Ошибка AI; повторный поиск назначен по расписанию.", cancellationToken).ConfigureAwait(false);
-        }
-
-        if (cancellationToken.IsCancellationRequested || !_admission.IsAdmitting)
-            return SetStatus(false, "Ответ AI устарел после Stop и не может создать вход.", route.Asset);
-
-        if (!response.IsFinalStream || response.ResponseRequestId != request.Id)
-            return await FailAssetAsync(route.Asset,
-                response.ResponseRequestId != request.Id
-                    ? "Ответ AI не связан с текущим запросом."
-                    : "Поток AI не завершён.",
-                "Ответ AI неполный; повторный поиск назначен по расписанию.", cancellationToken).ConfigureAwait(false);
-
-        var assessed = AiResponseAssessor.Assess(request, response);
-        if (assessed.Outcome == AiTestOutcome.ValidNoSetup)
+        var search = await CollectSearchResponseAsync(route, profile, cancellationToken)
+            .ConfigureAwait(false);
+        if (search.Cancelled)
+            return SetStatus(false, cancellationToken.IsCancellationRequested
+                ? "Запрос AI отменён; ответ не может создать вход."
+                : "Ответ AI устарел после Stop и не может создать вход.", route.Asset);
+        if (search.Failure is { } failure)
+            return search.FailureSummary is { } summary
+                ? await FailAssetAsync(route.Asset, failure, summary, cancellationToken).ConfigureAwait(false)
+                : SetStatus(false, failure, route.Asset);
+        if (search.IsNoSetup)
             return await RecordNoSetupAsync(route.Asset, profile, cancellationToken).ConfigureAwait(false);
-        if (assessed.Outcome != AiTestOutcome.CompleteSetup || assessed.Fields is null)
-            return await FailAssetAsync(route.Asset,
-                "Ответ AI неполный: " + string.Join(" ", assessed.Reasons),
-                "Ответ AI неполный; повторный поиск назначен по расписанию.", cancellationToken).ConfigureAwait(false);
+
+        if (search.Request is not { } request || search.Response is not { } response)
+            return SetStatus(false, "Ответ AI не содержит проверяемых данных.", route.Asset);
 
         var pending = new TradingLoopPendingSetup(request, response, _clock.UtcNow,
             profile.Settings.LimitReassessmentMinutes);
@@ -1594,6 +1622,523 @@ internal sealed class TradingLoopCoordinator
         return await EvaluatePendingSetupAsync(pending, route, routes, profile, cancellationToken)
             .ConfigureAwait(false);
     }
+
+    private async Task<TradingLoopSearchResult> CollectSearchResponseAsync(
+        TradingLoopRoute route,
+        SettingsProfile profile,
+        CancellationToken cancellationToken,
+        long collectionStartedAt = 0,
+        Func<bool>? deadlineExpired = null)
+    {
+        if (!_admission.IsAdmitting || !profile.SavedOperatingIntent
+            || profile.SelectedMode != "TrueNorth AI setups"
+            || !_recovery.IsEntryAllowed(route.Venue, profile.SavedOperatingIntent))
+            return new(route, null, null, null, null, "Новые входы закрыты перед запросом AI.",
+                null, false, false);
+
+        if (!AiAnalysisRequestFactory.TryCreateBatch(route.Asset, profile.Settings.EntryType,
+                out var requests, out var requestError) || requests.Count != 1)
+            return new(route, null, null, null, null, requestError, null, false, false);
+        var request = requests[0];
+
+        AiSourceResponse response;
+        try
+        {
+            response = await _analysis.AnalyzeAsync(request, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return new(route, request, null, null, null, null, null, false, true);
+        }
+        catch (Exception exception)
+        {
+            return new(route, request, null, null, null,
+                "Анализ AI завершился ошибкой (" + SafeFailureKind(exception) + ").",
+                "Ошибка AI; повторный поиск назначен по расписанию.", false, false);
+        }
+
+        if (cancellationToken.IsCancellationRequested || !_admission.IsAdmitting)
+            return new(route, request, response, null, null, null, null, false, true);
+
+        var receivedAt = _clock.UtcNow;
+        var withinDeadline = collectionStartedAt == 0 || deadlineExpired is null
+            || !deadlineExpired() && Stopwatch.GetElapsedTime(collectionStartedAt) < CandidateCollectionLimit;
+        if (!response.IsFinalStream || response.ResponseRequestId != request.Id)
+            return new(route, request, response, null, receivedAt,
+                response.ResponseRequestId != request.Id
+                    ? "Ответ AI не связан с текущим запросом."
+                    : "Поток AI не завершён.",
+                "Ответ AI неполный; повторный поиск назначен по расписанию.", false, false, withinDeadline);
+
+        var assessed = AiResponseAssessor.Assess(request, response);
+        if (assessed.Outcome == AiTestOutcome.ValidNoSetup)
+            return new(route, request, response, null, receivedAt, null, null, true, false, withinDeadline);
+        if (assessed.Outcome != AiTestOutcome.CompleteSetup || assessed.Fields is null)
+            return new(route, request, response, null, receivedAt,
+                "Ответ AI неполный: " + string.Join(" ", assessed.Reasons),
+                "Ответ AI неполный; повторный поиск назначен по расписанию.", false, false, withinDeadline);
+
+        return new(route, request, response, assessed.Fields, receivedAt, null, null, false, false, withinDeadline);
+    }
+
+    private async Task<TradingLoopOutcome> RunRankedCycleAsync(
+        IReadOnlyList<TradingLoopRoute> routes,
+        IReadOnlyDictionary<(string Venue, string Account), AccountSnapshot?> accounts,
+        IReadOnlyDictionary<TradingLoopRoute, TradingLoopContext> contexts,
+        SettingsProfile profile,
+        CancellationToken cancellationToken)
+    {
+        var skipped = new List<string>();
+        var queryRoutes = new List<TradingLoopRoute>();
+        foreach (var asset in profile.Settings.Assets.Where(value => !string.IsNullOrWhiteSpace(value))
+                     .Select(value => value!.Trim().ToUpperInvariant()))
+        {
+            if (_state.NextSearchAt.TryGetValue(asset, out var dueAt) && dueAt > _clock.UtcNow)
+            {
+                skipped.Add($"{asset}: срок следующего запроса {dueAt:O} ещё не наступил.");
+                continue;
+            }
+
+            var assetRoutes = routes.Where(route => route.Asset == asset).ToArray();
+            if (_orders.Orders.Any(order => assetRoutes.Any(route => route.Venue == order.Venue
+                    && route.Account == order.Account && route.Contract == order.Contract)
+                && ManagedOrderState.BlocksNewEntry(order)))
+            {
+                skipped.Add($"{asset}: уже есть сопровождаемая заявка или позиция.");
+                continue;
+            }
+
+            var queryRoute = FindEligibleSearchRoute(assetRoutes, accounts, contexts, profile, out var waitingReason);
+            if (queryRoute is null)
+            {
+                skipped.Add($"{asset}: {waitingReason ?? "нет допустимого маршрута"}");
+                continue;
+            }
+            queryRoutes.Add(queryRoute);
+        }
+
+        if (HasOutstandingCandidateRequests)
+        {
+            var waiting = "Способ выбора: чистый результат на TP. Предыдущий запрос AI не завершился после отмены; "
+                + "новый сбор отложен до его завершения.";
+            return await SaveRankingStatusAsync(waiting + FormatSkipped(skipped), null, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        if (queryRoutes.Count == 0)
+        {
+            var noQuery = "Способ выбора: чистый результат на TP. Нет активов с наступившим сроком и допустимым маршрутом.";
+            return await SaveRankingStatusAsync(noQuery + FormatSkipped(skipped), null, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        var collectionStartedAt = Stopwatch.GetTimestamp();
+        var deadlineExpired = 0;
+        using var requestCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        using var deadlineCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+
+        async Task ExpireCollectionAsync()
+        {
+            try
+            {
+                await _delay(CandidateCollectionLimit, deadlineCancellation.Token).ConfigureAwait(false);
+                Interlocked.Exchange(ref deadlineExpired, 1);
+                requestCancellation.Cancel();
+            }
+            catch (OperationCanceledException) when (deadlineCancellation.IsCancellationRequested)
+            {
+            }
+        }
+
+        var deadlineTask = ExpireCollectionAsync();
+        async Task<TradingLoopSearchResult> SearchCandidateAsync(TradingLoopRoute route)
+        {
+            Interlocked.Increment(ref _outstandingCandidateRequests);
+            try
+            {
+                return await CollectSearchResponseAsync(route, profile, requestCancellation.Token,
+                    collectionStartedAt, () => Volatile.Read(ref deadlineExpired) != 0).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (requestCancellation.IsCancellationRequested)
+            {
+                return new TradingLoopSearchResult(route, null, null, null, null, null, null,
+                    false, true, false);
+            }
+            catch (Exception exception)
+            {
+                return new TradingLoopSearchResult(route, null, null, null, null,
+                    "Анализ AI завершился ошибкой (" + SafeFailureKind(exception) + ").",
+                    "Ошибка AI; повторный поиск назначен по расписанию.", false, false, false);
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _outstandingCandidateRequests);
+            }
+        }
+
+        var searchTasks = queryRoutes.Select(SearchCandidateAsync).ToArray();
+        var allSearches = Task.WhenAll(searchTasks);
+        await Task.WhenAny(allSearches, deadlineTask).ConfigureAwait(false);
+
+        if (cancellationToken.IsCancellationRequested || !_admission.IsAdmitting)
+        {
+            requestCancellation.Cancel();
+            deadlineCancellation.Cancel();
+            return SetStatus(false, "Сбор кандидатов остановлен; ответ не может создать вход.");
+        }
+
+        var collectionTimedOut = !allSearches.IsCompleted;
+        if (collectionTimedOut)
+        {
+            Interlocked.Exchange(ref deadlineExpired, 1);
+            requestCancellation.Cancel();
+        }
+        else
+        {
+            deadlineCancellation.Cancel();
+        }
+
+        var viableSearches = new List<TradingLoopSearchResult>();
+        for (var index = 0; index < searchTasks.Length; index++)
+        {
+            var route = queryRoutes[index];
+            var task = searchTasks[index];
+            if (!task.IsCompletedSuccessfully)
+            {
+                var timeout = "Ответ не получен в пределах двухминутного окна сбора.";
+                skipped.Add($"{route.Asset}: {timeout}");
+                var failed = await FailAssetAsync(route.Asset, timeout,
+                    "Окно сбора истекло; повторный поиск назначен по расписанию.", CancellationToken.None)
+                    .ConfigureAwait(false);
+                if (!_admission.IsAdmitting)
+                    return failed;
+                continue;
+            }
+
+            var search = task.Result;
+            if (search.Cancelled)
+            {
+                if (cancellationToken.IsCancellationRequested || !_admission.IsAdmitting)
+                    return SetStatus(false, "Сбор кандидатов остановлен; ответ не может создать вход.");
+                if (collectionTimedOut || Volatile.Read(ref deadlineExpired) != 0)
+                {
+                    const string timeout = "Ответ не получен в пределах двухминутного окна сбора.";
+                    skipped.Add($"{route.Asset}: {timeout}");
+                    var failed = await FailAssetAsync(route.Asset, timeout,
+                        "Окно сбора истекло; повторный поиск назначен по расписанию.", CancellationToken.None)
+                        .ConfigureAwait(false);
+                    if (!_admission.IsAdmitting)
+                        return failed;
+                }
+                else
+                    skipped.Add($"{route.Asset}: запрос отменён до получения ответа.");
+                continue;
+            }
+
+            if (!search.ReceivedBeforeDeadline)
+            {
+                const string late = "Ответ получен после двухминутного окна и исключён из сравнения.";
+                skipped.Add($"{route.Asset}: {late}");
+                var failed = await FailAssetAsync(route.Asset, late,
+                    "Поздний ответ исключён; повторный поиск назначен по расписанию.", CancellationToken.None)
+                    .ConfigureAwait(false);
+                if (!_admission.IsAdmitting)
+                    return failed;
+                continue;
+            }
+
+            if (search.Failure is { } failure)
+            {
+                skipped.Add($"{route.Asset}: {failure}");
+                if (search.FailureSummary is { } summary)
+                {
+                    var failed = await FailAssetAsync(route.Asset, failure, summary, CancellationToken.None)
+                        .ConfigureAwait(false);
+                    if (!_admission.IsAdmitting)
+                        return failed;
+                }
+                continue;
+            }
+
+            if (search.IsNoSetup)
+            {
+                skipped.Add($"{route.Asset}: NO_SETUP; повтор назначен по обычному сроку.");
+                var noSetup = await RecordNoSetupAsync(route.Asset, profile, CancellationToken.None)
+                    .ConfigureAwait(false);
+                if (!_admission.IsAdmitting)
+                    return noSetup;
+                continue;
+            }
+
+            if (search.Fields is null || search.Request is null || search.Response is null
+                || search.ReceivedAt is null)
+            {
+                const string incomplete = "Ответ AI не содержит полного проверяемого сетапа.";
+                skipped.Add($"{route.Asset}: {incomplete}");
+                var failed = await FailAssetAsync(route.Asset, incomplete,
+                    "Ответ AI неполный; повторный поиск назначен по расписанию.", CancellationToken.None)
+                    .ConfigureAwait(false);
+                if (!_admission.IsAdmitting)
+                    return failed;
+                continue;
+            }
+            viableSearches.Add(search);
+        }
+
+        if (cancellationToken.IsCancellationRequested || !_admission.IsAdmitting)
+            return SetStatus(false, "Сбор кандидатов остановлен до проверки допуска.");
+
+        var collectionSkipped = skipped.ToArray();
+        var evaluation = await EvaluateRankedCandidatesAsync(viableSearches, routes, profile, skipped,
+            cancellationToken).ConfigureAwait(false);
+        if (evaluation.Failure is { } evaluationFailure)
+            return evaluationFailure;
+
+        if (evaluation.RetryAssets.Count > 0)
+        {
+            var retryAt = _clock.UtcNow.AddSeconds(Math.Clamp(profile.Settings.RecoveryCheckSeconds,
+                (int)PendingEligibilityRetryMinimum.TotalSeconds,
+                (int)PendingEligibilityRetryMaximum.TotalSeconds));
+            var nextSearchAt = new Dictionary<string, DateTimeOffset>(_state.NextSearchAt, StringComparer.Ordinal);
+            foreach (var retryAsset in evaluation.RetryAssets.Distinct(StringComparer.Ordinal))
+                nextSearchAt[retryAsset] = retryAt;
+            if (!await SaveLoopStateAsync(_state with { NextSearchAt = nextSearchAt }, CancellationToken.None)
+                    .ConfigureAwait(false))
+                return SetStatus(false, "Срок повторной проверки допуска не удалось сохранить; новые входы закрыты.");
+        }
+
+        var candidates = evaluation.Candidates;
+        if (candidates.Count == 0)
+        {
+            var none = $"Способ выбора: чистый результат на TP. Допуск 007 не подтвердил ни одного кандидата; время оценки {evaluation.EvaluatedAt:O}.";
+            return await SaveRankingStatusAsync(none + FormatSkipped(skipped), null, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        var estimates = candidates.Select(candidate => candidate.Estimate).ToArray();
+        if (!CandidateProfitEstimator.TrySelectWinner(estimates, out var winnerIndex, out var currenciesDiffer)
+            && currenciesDiffer)
+        {
+            var currencies = estimates.Select(estimate => estimate.Currency).Distinct(StringComparer.Ordinal).ToArray();
+            var mixed = $"Способ выбора: чистый результат на TP. Сравнение остановлено: у допущенных кандидатов разные валюты ({string.Join(", ", currencies)}); время оценки {evaluation.EvaluatedAt:O}.";
+            return await SaveRankingStatusAsync(mixed + FormatCandidateScores(candidates, null) + FormatSkipped(skipped),
+                null, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (winnerIndex < 0)
+        {
+            var nonPositive = $"Способ выбора: чистый результат на TP. Вход пропущен: лучшая оценка не положительна; время оценки {evaluation.EvaluatedAt:O}.";
+            return await SaveRankingStatusAsync(nonPositive + FormatCandidateScores(candidates, null)
+                + FormatSkipped(skipped), null, cancellationToken).ConfigureAwait(false);
+        }
+        var winner = candidates[winnerIndex];
+
+        var selectionSummary = FormatRankingSummary(evaluation.EvaluatedAt, winner, candidates, skipped);
+        var pendingSetup = new TradingLoopPendingSetup(winner.Search.Request!, winner.Search.Response!,
+            winner.Search.ReceivedAt, profile.Settings.LimitReassessmentMinutes,
+            WasCandidateRanked: true, CandidateRankingSummary: selectionSummary);
+        var saved = await SaveAcceptedPendingSetupAsync(pendingSetup, profile, cancellationToken)
+            .ConfigureAwait(false);
+        if (!saved.Succeeded)
+            return saved;
+        _pendingSetupLoadedAtStartup = false;
+        return await EvaluatePendingSetupAsync(pendingSetup, winner.Search.Route, routes, profile,
+            cancellationToken, new RankingSnapshot(viableSearches.ToArray(), candidates, winner,
+                collectionSkipped)).ConfigureAwait(false);
+    }
+
+    private bool HasOutstandingCandidateRequests => Volatile.Read(ref _outstandingCandidateRequests) > 0;
+
+    private sealed record RankedEvaluationResult(
+        IReadOnlyList<RankedCandidate> Candidates,
+        IReadOnlyList<string> RetryAssets,
+        DateTimeOffset EvaluatedAt,
+        TradingLoopOutcome? Failure);
+
+    private async Task<RankedEvaluationResult> EvaluateRankedCandidatesAsync(
+        IReadOnlyList<TradingLoopSearchResult> searches,
+        IReadOnlyList<TradingLoopRoute> routes,
+        SettingsProfile profile,
+        ICollection<string> skipped,
+        CancellationToken cancellationToken)
+    {
+        var accounts = await ReadAccountsAsync(routes, cancellationToken).ConfigureAwait(false);
+        if (accounts.Values.Any(account => account is null))
+            return new([], [], _clock.UtcNow,
+                BlockGlobally("После сбора кандидатов не удалось подтвердить каждый счёт и связанную экспозицию."));
+        var snapshots = accounts.Values.Cast<AccountSnapshot>().ToArray();
+        var evaluatedAt = _clock.UtcNow;
+        var candidates = new List<RankedCandidate>();
+        var retryAssets = new List<string>();
+
+        foreach (var search in searches)
+        {
+            if (cancellationToken.IsCancellationRequested)
+                return new(candidates, retryAssets, evaluatedAt,
+                    SetStatus(false, "Сбор кандидатов остановлен до завершения допуска."));
+            if (search.Request is not { } request || search.Response is not { } response
+                || search.Fields is not { } fields)
+                continue;
+            if (ToEligibilitySetup(request, fields) is not { } setup)
+            {
+                skipped.Add($"{search.Route.Asset}: время опоры или обязательные поля сетапа не подтверждены.");
+                retryAssets.Add(search.Route.Asset);
+                continue;
+            }
+
+            var assetRoutes = routes.Where(route => route.Asset == search.Route.Asset).ToArray();
+            var assetContexts = new Dictionary<TradingLoopRoute, TradingLoopContext>();
+            foreach (var route in assetRoutes)
+            {
+                var context = await _contexts.ReadAsync(route, snapshots, setup, profile, evaluatedAt, cancellationToken)
+                    .ConfigureAwait(false);
+                assetContexts[route] = context;
+                if (context.AllConnectedExposureCovered != true)
+                    return new(candidates, retryAssets, evaluatedAt,
+                        BlockGlobally(context.Reason ?? "Связь всей экспозиции после ответа AI неизвестна."));
+            }
+
+            if (!assetContexts.TryGetValue(search.Route, out var queryContext)
+                || queryContext.EligibilityInput is not { } input
+                || !ExactInputMatches(request, setup, profile, input, snapshots))
+            {
+                skipped.Add($"{search.Route.Asset}: текущий допуск не связан с точными свежими снимками счетов и ответом AI.");
+                retryAssets.Add(search.Route.Asset);
+                continue;
+            }
+
+            input = input with { EvaluatedAt = evaluatedAt };
+            var eligibility = EntryEligibilityEvaluator.Evaluate(input);
+            if (eligibility.Status != EntryEligibilityStatus.ScenarioReady
+                || eligibility.SelectedPool is not { Quantity: > 0m } pool)
+            {
+                skipped.Add($"{search.Route.Asset}: допуск 007 — {string.Join(" ", eligibility.Reasons)}");
+                retryAssets.Add(search.Route.Asset);
+                continue;
+            }
+
+            var selectedRoute = assetRoutes.SingleOrDefault(route => route.Venue == pool.Venue
+                && route.Account == pool.Account && route.Contract == pool.Contract);
+            if (selectedRoute is null || !assetContexts.TryGetValue(selectedRoute, out var selectedContext)
+                || !selectedContext.RouteAvailable
+                || !_recovery.IsEntryAllowed(pool.Venue, profile.SavedOperatingIntent))
+            {
+                skipped.Add($"{search.Route.Asset}: маршрут, выбранный допуском 007, недоступен или ожидает сверки 008.");
+                retryAssets.Add(search.Route.Asset);
+                continue;
+            }
+
+            var sourcePools = input.Pools.Where(item => item.Account.Venue == pool.Venue
+                && item.Account.Account == pool.Account).ToArray();
+            CandidateProfitEstimate? estimate = null;
+            var instrumentMatches = sourcePools.Length == 1
+                ? sourcePools[0].Instruments.Where(item => item.Identity.Venue == pool.Venue
+                    && item.Identity.Contract == pool.Contract).ToArray()
+                : [];
+            var reason = "Данные точного пула обеспечения или рынка неоднозначны.";
+            if (instrumentMatches.Length != 1
+                || !CandidateProfitEstimator.TryCalculate(setup, pool.QuoteCurrency, pool.EntryPrice,
+                    pool.Quantity, pool.BaseQuantity, instrumentMatches[0], out estimate, out reason)
+                || estimate is null)
+            {
+                skipped.Add($"{search.Route.Asset}: расчёт прибыли пропущен — "
+                    + (string.IsNullOrWhiteSpace(reason) ? "данные рынка неоднозначны." : reason));
+                retryAssets.Add(search.Route.Asset);
+                continue;
+            }
+
+            candidates.Add(new RankedCandidate(search, setup, input, snapshots, selectedRoute,
+                eligibility, pool, estimate));
+        }
+
+        return new(candidates, retryAssets, evaluatedAt, null);
+    }
+
+    private async Task<TradingLoopOutcome?> UpdateRankedRetryScheduleAsync(
+        IReadOnlyList<TradingLoopSearchResult> searches,
+        IReadOnlyList<string> retryAssets,
+        SettingsProfile profile)
+    {
+        var evaluatedAssets = searches.Select(search => search.Route.Asset)
+            .Distinct(StringComparer.Ordinal).ToArray();
+        if (evaluatedAssets.Length == 0)
+            return null;
+
+        var retrySet = retryAssets.ToHashSet(StringComparer.Ordinal);
+        var retryAt = _clock.UtcNow.AddSeconds(Math.Clamp(profile.Settings.RecoveryCheckSeconds,
+            (int)PendingEligibilityRetryMinimum.TotalSeconds,
+            (int)PendingEligibilityRetryMaximum.TotalSeconds));
+        var nextSearchAt = new Dictionary<string, DateTimeOffset>(_state.NextSearchAt, StringComparer.Ordinal);
+        var changed = false;
+        foreach (var asset in evaluatedAssets)
+        {
+            if (retrySet.Contains(asset))
+            {
+                if (!nextSearchAt.TryGetValue(asset, out var existing) || existing != retryAt)
+                {
+                    nextSearchAt[asset] = retryAt;
+                    changed = true;
+                }
+            }
+            else if (nextSearchAt.Remove(asset))
+                changed = true;
+        }
+
+        if (!changed)
+            return null;
+        if (!await SaveLoopStateAsync(_state with { NextSearchAt = nextSearchAt }, CancellationToken.None)
+                .ConfigureAwait(false))
+            return SetStatus(false, "Срок повторной проверки допуска не удалось сохранить; новые входы закрыты.");
+        return null;
+    }
+
+    private async Task<TradingLoopOutcome> SaveRankingStatusAsync(
+        string status,
+        string? asset,
+        CancellationToken cancellationToken)
+    {
+        if (cancellationToken.IsCancellationRequested || !_admission.IsAdmitting)
+            return SetStatus(false, "Сравнение кандидатов остановлено; вход не передан.", asset);
+        if (!await SaveLoopStateAsync(_state with { LastStatus = status }, CancellationToken.None)
+                .ConfigureAwait(false))
+            return SetStatus(false, "Результат сравнения не удалось сохранить; новые входы закрыты.", asset);
+        return SetStatus(true, status, asset);
+    }
+
+    private static string FormatCandidateScores(
+        IEnumerable<RankedCandidate> candidates,
+        RankedCandidate? winner)
+    {
+        var otherScores = candidates.Where(candidate => !ReferenceEquals(candidate, winner))
+            .Select(candidate => $"{candidate.Search.Route.Asset}: {FormatEstimate(candidate.Estimate)}"
+                + (winner is null ? string.Empty
+                    : candidate.Estimate.NetProfit == winner.Estimate.NetProfit
+                        ? " (равенство, сохранён порядок активов)" : " (ниже победителя)"))
+            .ToArray();
+        return otherScores.Length == 0 ? string.Empty : " Другие кандидаты: " + string.Join("; ", otherScores) + ".";
+    }
+
+    private static string FormatRankingSummary(
+        DateTimeOffset evaluatedAt,
+        RankedCandidate winner,
+        IReadOnlyList<RankedCandidate> candidates,
+        IEnumerable<string> skipped) =>
+        $"Способ: чистый результат на TP. Оценка: {evaluatedAt:O}. "
+        + $"Выбран {winner.Search.Route.Asset}; маршрут {winner.Route.Venue}/{winner.Route.Account}/{winner.Route.Contract}; "
+        + FormatEstimate(winner.Estimate) + FormatCandidateScores(candidates, winner) + FormatSkipped(skipped);
+
+    private static string FormatSkipped(IEnumerable<string> skipped)
+    {
+        var reasons = skipped.ToArray();
+        return reasons.Length == 0 ? string.Empty : " Причины пропуска: " + string.Join("; ", reasons) + ".";
+    }
+
+    private static string FormatEstimate(CandidateProfitEstimate estimate) =>
+        $"{estimate.Currency}: валовой {FormatValue(estimate.GrossProfit)} − комиссия входа {FormatValue(estimate.EntryFee)} "
+        + $"− комиссия выхода {FormatValue(estimate.ExitFee)} − funding за 24 ч {FormatValue(estimate.AdverseFunding)} "
+        + $"= чистый {FormatValue(estimate.NetProfit)}";
+
+    private static string FormatValue(decimal value) => value.ToString("0.########", CultureInfo.InvariantCulture);
 
     private async Task<TradingLoopOutcome> ReassessPersistedSetupAsync(
         TradingLoopPendingSetup pending,
@@ -1668,7 +2213,8 @@ internal sealed class TradingLoopCoordinator
         TradingLoopRoute analysisRoute,
         IReadOnlyList<TradingLoopRoute> routes,
         SettingsProfile profile,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        RankingSnapshot? rankingSnapshot = null)
     {
         var asset = pending.Request.Asset;
         var assessed = AiResponseAssessor.Assess(pending.Request, pending.Response);
@@ -1683,42 +2229,129 @@ internal sealed class TradingLoopCoordinator
                 "Время рыночной опоры сетапа неизвестно; вход отложен.", profile, cancellationToken)
                 .ConfigureAwait(false);
 
-        var accounts = await ReadAccountsAsync(routes, cancellationToken).ConfigureAwait(false);
-        if (accounts.Values.Any(account => account is null))
-            return BlockGlobally("После ответа AI не удалось подтвердить каждый счёт и связанную экспозицию.");
-        var snapshots = accounts.Values.Cast<AccountSnapshot>().ToArray();
-
-        var contexts = new Dictionary<TradingLoopRoute, TradingLoopContext>();
-        foreach (var route in routes.Where(route => route.Asset == asset))
+        AccountSnapshot[] snapshots;
+        EntryEligibilityInput input;
+        EntryEligibilityResult eligibility;
+        EntryPoolResult? pool;
+        TradingLoopRoute? selectedRoute;
+        if (rankingSnapshot is { } ranking)
         {
-            var context = await _contexts.ReadAsync(route, snapshots, setup, profile, _clock.UtcNow,
-                cancellationToken).ConfigureAwait(false);
-            contexts[route] = context;
-            if (context.AllConnectedExposureCovered != true)
-                return BlockGlobally(context.Reason ?? "Связь всей экспозиции после ответа AI неизвестна.");
+            var refreshedSkipped = new List<string>(ranking.CollectionSkipped);
+            var refreshed = await EvaluateRankedCandidatesAsync(
+                ranking.Searches, routes, profile,
+                refreshedSkipped, cancellationToken).ConfigureAwait(false);
+            if (refreshed.Failure is { } refreshFailure)
+                return refreshFailure;
+            var retrySchedule = await UpdateRankedRetryScheduleAsync(
+                ranking.Searches, refreshed.RetryAssets, profile).ConfigureAwait(false);
+            if (retrySchedule is not null)
+                return retrySchedule;
+
+            var refreshedCandidates = refreshed.Candidates;
+            if (refreshedCandidates.Count == 0)
+            {
+                var noFreshCandidates = $"Способ выбора: чистый результат на TP. После обновления счёта и рынка "
+                    + $"ни один кандидат не прошёл допуск 007; время оценки {refreshed.EvaluatedAt:O}."
+                    + FormatSkipped(refreshedSkipped);
+                return await DeferPendingSetupAsync(pending with { CandidateRankingSummary = noFreshCandidates },
+                    "Передача отложена до нового сбора кандидатов.", profile, cancellationToken).ConfigureAwait(false);
+            }
+
+            var refreshedEstimates = refreshedCandidates.Select(candidate => candidate.Estimate).ToArray();
+            if (!CandidateProfitEstimator.TrySelectWinner(refreshedEstimates,
+                    out var refreshedWinnerIndex, out var refreshedCurrenciesDiffer))
+            {
+                var refreshReason = refreshedCurrenciesDiffer
+                    ? "После обновления у допущенных кандидатов разные валюты; выбор остановлен."
+                    : "После обновления нет строго положительной чистой оценки; вход пропущен.";
+                var refreshedCurrencyText = string.Join(", ", refreshedEstimates
+                    .Select(estimate => estimate.Currency).Distinct(StringComparer.Ordinal));
+                var noUpdatedWinner = $"Способ выбора: чистый результат на TP. {refreshReason} "
+                    + $"Валюты: {refreshedCurrencyText}. Время оценки {refreshed.EvaluatedAt:O}."
+                    + FormatCandidateScores(refreshedCandidates, null) + FormatSkipped(refreshedSkipped);
+                return await DeferPendingSetupAsync(pending with { CandidateRankingSummary = noUpdatedWinner },
+                    "Передача отложена до нового сбора кандидатов.", profile, cancellationToken).ConfigureAwait(false);
+            }
+
+            var winner = refreshedCandidates[refreshedWinnerIndex];
+            assessed = AiResponseAssessor.Assess(winner.Search.Request!, winner.Search.Response!);
+            if (assessed.Outcome != AiTestOutcome.CompleteSetup || assessed.Fields is null)
+                return await DeferPendingSetupAsync(pending,
+                    "Обновлённый победитель не прошёл повторную проверку AI.", profile, cancellationToken)
+                    .ConfigureAwait(false);
+            setup = winner.Setup;
+            asset = winner.Search.Route.Asset;
+            analysisRoute = winner.Search.Route;
+            var refreshedSummary = FormatRankingSummary(refreshed.EvaluatedAt, winner, refreshedCandidates,
+                refreshedSkipped);
+            pending = pending with
+            {
+                Request = winner.Search.Request!,
+                Response = winner.Search.Response!,
+                ReceivedAt = winner.Search.ReceivedAt,
+                PreparedEntry = null,
+                CandidateRankingSummary = refreshedSummary
+            };
+            if (!await SaveLoopStateAsync(_state with
+                {
+                    PendingSetup = pending,
+                    LastStatus = refreshedSummary
+                }, cancellationToken).ConfigureAwait(false))
+                return SetStatus(false, "Обновлённый выбор кандидатов не удалось сохранить; вход не начат.", asset);
+
+            snapshots = winner.Accounts;
+            input = winner.Input;
+            eligibility = winner.Eligibility;
+            pool = winner.Pool;
+            selectedRoute = winner.Route;
+            rankingSnapshot = new RankingSnapshot(ranking.Searches, refreshedCandidates, winner,
+                refreshedSkipped.ToArray());
+        }
+        else
+        {
+            var accounts = await ReadAccountsAsync(routes, cancellationToken).ConfigureAwait(false);
+            if (accounts.Values.Any(account => account is null))
+                return BlockGlobally("После ответа AI не удалось подтвердить каждый счёт и связанную экспозицию.");
+            snapshots = accounts.Values.Cast<AccountSnapshot>().ToArray();
+
+            var contexts = new Dictionary<TradingLoopRoute, TradingLoopContext>();
+            foreach (var route in routes.Where(route => route.Asset == asset))
+            {
+                var context = await _contexts.ReadAsync(route, snapshots, setup, profile, _clock.UtcNow,
+                    cancellationToken).ConfigureAwait(false);
+                contexts[route] = context;
+                if (context.AllConnectedExposureCovered != true)
+                    return BlockGlobally(context.Reason ?? "Связь всей экспозиции после ответа AI неизвестна.");
+            }
+
+            if (!contexts.TryGetValue(analysisRoute, out var candidateContext)
+                || candidateContext.AllConnectedExposureCovered != true
+                || candidateContext.EligibilityInput is not { } candidateInput
+                || !ExactInputMatches(pending.Request, setup, profile, candidateInput, snapshots))
+                return await DeferPendingSetupAsync(pending,
+                    "Текущие данные допуска не связаны с точными свежими снимками счетов.", profile,
+                    cancellationToken).ConfigureAwait(false);
+
+            input = candidateInput with { EvaluatedAt = _clock.UtcNow };
+            eligibility = EntryEligibilityEvaluator.Evaluate(input);
+            pool = eligibility.SelectedPool;
+            if (eligibility.Status != EntryEligibilityStatus.ScenarioReady || pool is null || pool.Quantity is not > 0)
+                return await DeferPendingSetupAsync(pending,
+                    "Допуск 007 ожидает свежих условий: " + string.Join(" ", eligibility.Reasons),
+                    profile, cancellationToken).ConfigureAwait(false);
+
+            var assetRoutes = routes.Where(route => route.Asset == asset).ToArray();
+            selectedRoute = assetRoutes.SingleOrDefault(route => route.Venue == pool.Venue
+                && route.Account == pool.Account && route.Contract == pool.Contract);
+            if (selectedRoute is null || !contexts.TryGetValue(selectedRoute, out var selectedContext)
+                || !selectedContext.RouteAvailable)
+                return await DeferPendingSetupAsync(pending,
+                    "007 выбрал маршрут, который не подтверждён текущей доступностью и сверкой.", profile,
+                    cancellationToken).ConfigureAwait(false);
         }
 
-        if (!contexts.TryGetValue(analysisRoute, out var candidateContext)
-            || candidateContext.AllConnectedExposureCovered != true
-            || candidateContext.EligibilityInput is not { } input
-            || !ExactInputMatches(pending.Request, setup, profile, input, snapshots))
-            return await DeferPendingSetupAsync(pending,
-                "Текущие данные допуска не связаны с точными свежими снимками счетов.", profile,
-                cancellationToken).ConfigureAwait(false);
-
-        input = input with { EvaluatedAt = _clock.UtcNow };
-        var eligibility = EntryEligibilityEvaluator.Evaluate(input);
-        var pool = eligibility.SelectedPool;
-        if (eligibility.Status != EntryEligibilityStatus.ScenarioReady || pool is null || pool.Quantity is not > 0)
-            return await DeferPendingSetupAsync(pending,
-                "Допуск 007 ожидает свежих условий: " + string.Join(" ", eligibility.Reasons),
-                profile, cancellationToken).ConfigureAwait(false);
-
-        var assetRoutes = routes.Where(route => route.Asset == asset).ToArray();
-        var selectedRoute = assetRoutes.SingleOrDefault(route => route.Venue == pool.Venue
-            && route.Account == pool.Account && route.Contract == pool.Contract);
-        if (selectedRoute is null || !contexts.TryGetValue(selectedRoute, out var selectedContext)
-            || !selectedContext.RouteAvailable || !_recovery.IsEntryAllowed(pool.Venue, profile.SavedOperatingIntent))
+        if (pool is null || selectedRoute is null || pool.Quantity is not > 0
+            || !_recovery.IsEntryAllowed(pool.Venue, profile.SavedOperatingIntent))
             return await DeferPendingSetupAsync(pending,
                 "007 выбрал маршрут, который не подтверждён текущей доступностью и сверкой.", profile,
                 cancellationToken).ConfigureAwait(false);
@@ -1765,7 +2398,8 @@ internal sealed class TradingLoopCoordinator
             {
                 PendingSetup = pending,
                 LimitReassessments = statesBeforeEntry,
-                LastStatus = "Точный IntentId и маршрут входа сохранены до границы передачи."
+                LastStatus = pending.CandidateRankingSummary
+                    ?? "Точный IntentId и маршрут входа сохранены до границы передачи."
             }, cancellationToken).ConfigureAwait(false))
             return SetStatus(false, "Точный IntentId не записан; вход не начат.", asset);
 
@@ -1777,7 +2411,7 @@ internal sealed class TradingLoopCoordinator
         bool Fence(Func<bool> beginTransfer) => _admission.RunIfAdmitting(() =>
             Volatile.Read(ref _profileUpdateInProgress) == 0 && Volatile.Read(ref _stopInProgress) == 0
             && _admission.Generation == generation
-            && CurrentProfileAllowsEntry(intent, pending.Request, setup, profile, input, snapshots)
+            && CurrentProfileAllowsEntry(intent, pending.Request, setup, profile, input, snapshots, rankingSnapshot)
             && beginTransfer());
 
         var opened = await _orders.OpenAsync(intent, input, savedOperatingIntent: true,
@@ -1813,15 +2447,19 @@ internal sealed class TradingLoopCoordinator
                         ? LimitReassessmentPhase.Scheduled : LimitReassessmentPhase.WaitingForEntry);
             }
 
+            var entryStatus = pending.CandidateRankingSummary is { } rankingSummary
+                ? rankingSummary + " " + opened.Status
+                : opened.Status;
             if (!await SaveLoopStateAsync(_state with
                 {
                     PendingSetup = null,
                     LimitReassessments = limitReassessments,
-                    LastStatus = opened.Status
+                    LastStatus = entryStatus
                 }, CancellationToken.None).ConfigureAwait(false))
                 return SetStatus(false, "Действие записано в журнале, но состояние сетапа не удалось очистить.",
                     asset, opened.IntentId);
             _pendingSetupLoadedAtStartup = false;
+            return SetStatus(opened.Succeeded, entryStatus, asset, opened.IntentId);
         }
         else if (!opened.Succeeded)
         {
@@ -1842,7 +2480,8 @@ internal sealed class TradingLoopCoordinator
         {
             NextSearchAt = next,
             PendingSetup = pending,
-            LastStatus = $"Новый ответ для {pending.Request.Asset} сохранён и ожидает свежей проверки риска."
+            LastStatus = pending.CandidateRankingSummary
+                ?? $"Новый ответ для {pending.Request.Asset} сохранён и ожидает свежей проверки риска."
         };
         if (!await SaveLoopStateAsync(state, cancellationToken).ConfigureAwait(false))
             return SetStatus(false, "Ответ AI получен, но не сохранён; вход не начат.", pending.Request.Asset);
@@ -1921,15 +2560,18 @@ internal sealed class TradingLoopCoordinator
         {
             [pending.Request.Asset] = due
         };
+        var status = pending.CandidateRankingSummary is { } rankingSummary
+            ? rankingSummary + " " + reason
+            : reason;
         if (!await SaveLoopStateAsync(_state with
             {
                 NextSearchAt = next,
-                PendingSetup = pending,
-                LastStatus = reason
-            }, cancellationToken).ConfigureAwait(false))
+                PendingSetup = pending.WasCandidateRanked ? null : pending,
+                LastStatus = status
+            }, pending.WasCandidateRanked ? CancellationToken.None : cancellationToken).ConfigureAwait(false))
             return SetStatus(false, "Временное ожидание сетапа не удалось сохранить; входы закрыты.",
                 pending.Request.Asset);
-        return SetStatus(false, reason + $" Повтор проверки после {due:O}.", pending.Request.Asset);
+        return SetStatus(false, status + $" Повтор проверки после {due:O}.", pending.Request.Asset);
     }
 
     private TradingLoopRoute? FindEligibleSearchRoute(
@@ -2079,13 +2721,52 @@ internal sealed class TradingLoopCoordinator
         return true;
     }
 
+    private bool RankingStillCurrent(RankingSnapshot ranking)
+    {
+        var evaluatedAt = _clock.UtcNow;
+        RankedCandidate? currentWinner = null;
+        string? currency = null;
+        foreach (var candidate in ranking.Candidates)
+        {
+            var eligibility = EntryEligibilityEvaluator.Evaluate(candidate.Input with { EvaluatedAt = evaluatedAt });
+            if (eligibility.Status != EntryEligibilityStatus.ScenarioReady
+                || eligibility.SelectedPool is not { Quantity: > 0m } pool
+                || pool.Venue != candidate.Pool.Venue || pool.Account != candidate.Pool.Account
+                || pool.Contract != candidate.Pool.Contract || pool.QuoteCurrency != candidate.Pool.QuoteCurrency
+                || pool.EntryPrice != candidate.Pool.EntryPrice || pool.Quantity != candidate.Pool.Quantity
+                || pool.BaseQuantity != candidate.Pool.BaseQuantity)
+                return false;
+
+            var pools = candidate.Input.Pools.Where(item => item.Account.Venue == pool.Venue
+                && item.Account.Account == pool.Account).ToArray();
+            var instruments = pools.Length == 1
+                ? pools[0].Instruments.Where(item => item.Identity.Venue == pool.Venue
+                    && item.Identity.Contract == pool.Contract).ToArray()
+                : [];
+            if (instruments.Length != 1
+                || !CandidateProfitEstimator.TryCalculate(candidate.Setup, pool.QuoteCurrency, pool.EntryPrice,
+                    pool.Quantity, pool.BaseQuantity, instruments[0], out var estimate, out _)
+                || estimate is null
+                || estimate != candidate.Estimate
+                || currency is not null && currency != estimate.Currency)
+                return false;
+
+            currency = estimate.Currency;
+            if (estimate.NetProfit > 0m
+                && (currentWinner is null || estimate.NetProfit > currentWinner.Estimate.NetProfit))
+                currentWinner = candidate;
+        }
+        return currentWinner?.Search.Request?.Id == ranking.Winner.Search.Request?.Id;
+    }
+
     private bool CurrentProfileAllowsEntry(
         ManagedOrderIntent intent,
         AiAnalysisRequest request,
         EntryEligibilitySetup setup,
         SettingsProfile expectedProfile,
         EntryEligibilityInput input,
-        IReadOnlyList<AccountSnapshot> currentAccounts)
+        IReadOnlyList<AccountSnapshot> currentAccounts,
+        RankingSnapshot? rankingSnapshot = null)
     {
         var current = Volatile.Read(ref _profile);
         return current.SavedOperatingIntent && current.SelectedMode == "TrueNorth AI setups"
@@ -2094,7 +2775,9 @@ internal sealed class TradingLoopCoordinator
             && current.Settings.EntryType == expectedProfile.Settings.EntryType
             && current.Settings.MarginBalancePercent == expectedProfile.Settings.MarginBalancePercent
             && current.Settings.Leverage == expectedProfile.Settings.Leverage
+            && current.Settings.CandidateSelectionMethod == expectedProfile.Settings.CandidateSelectionMethod
             && ExactInputMatches(request, setup, expectedProfile, input, currentAccounts)
+            && (rankingSnapshot is null || RankingStillCurrent(rankingSnapshot))
             && EntryEligibilityEvaluator.Evaluate(input with { EvaluatedAt = _clock.UtcNow }) is
                 { Status: EntryEligibilityStatus.ScenarioReady,
                     SelectedPool: { } selected }
@@ -2111,6 +2794,7 @@ internal sealed class TradingLoopCoordinator
     {
         if (input.Settings.SelectedMode != profile.SelectedMode || !input.Settings.SavedOperatingIntent
             || input.Settings.Settings.EntryType != profile.Settings.EntryType
+            || input.Settings.Settings.CandidateSelectionMethod != profile.Settings.CandidateSelectionMethod
             || input.Settings.Settings.MarginBalancePercent != profile.Settings.MarginBalancePercent
             || input.Settings.Settings.Leverage != profile.Settings.Leverage
             || !input.Settings.Settings.Assets.SequenceEqual(profile.Settings.Assets, StringComparer.OrdinalIgnoreCase)

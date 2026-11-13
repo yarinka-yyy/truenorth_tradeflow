@@ -158,6 +158,33 @@ internal static class Program
         Check(settings.Assets.Count == 0 && settings.EntryType is null
               && settings.MarginBalancePercent is null && settings.Leverage is null,
             "first-run trading inputs are empty");
+        Check(settings.CandidateSelectionMethod == "AssetOrder"
+              && JsonSerializer.Deserialize<AppSettings>("{}")?.CandidateSelectionMethod == "AssetOrder",
+            "profiles without the candidate selection field default to asset order");
+        var oldProfilePath = Path.Combine(root, "candidate-selection-legacy", "settings.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(oldProfilePath)!);
+        var legacyOptions = new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            WriteIndented = true
+        };
+        var legacyEnvelope = JsonSerializer.SerializeToNode(
+            new SettingsEnvelope { Profile = CompleteProfile() }, legacyOptions)!;
+        legacyEnvelope["profile"]!["settings"]!.AsObject().Remove("candidateSelectionMethod");
+        File.WriteAllText(oldProfilePath, legacyEnvelope.ToJsonString(legacyOptions));
+        var oldProfile = new SettingsStore(oldProfilePath).Load();
+        Check(oldProfile.Status == SettingsFileStatus.Loaded
+              && oldProfile.Profile.Settings.CandidateSelectionMethod == "AssetOrder",
+            "a saved profile from before candidate ranking opens with the existing asset order");
+
+        var rankingProfile = CompleteProfile();
+        rankingProfile.Settings.CandidateSelectionMethod = "NetProfitAtTakeProfit";
+        var rankingStore = new SettingsStore(Path.Combine(root, "candidate-selection-ranking", "settings.json"));
+        var rankingSaved = rankingStore.Save(rankingProfile);
+        var rankingReloaded = rankingStore.Load();
+        Check(rankingSaved.Succeeded && rankingReloaded.Status == SettingsFileStatus.Loaded
+              && rankingReloaded.Profile.Settings.CandidateSelectionMethod == "NetProfitAtTakeProfit",
+            "the candidate selection setting survives the normal save and reload path");
         Check(settings.PositionCheckMinutes == 60 && settings.LimitOrderCheckMinutes == 2
               && settings.PartialFillCancelMinutes == 60 && settings.NewSetupRetryMinutes == 240
               && settings.LimitReassessmentMinutes == 240,
@@ -208,6 +235,11 @@ internal static class Program
         badLeverage.Settings.Leverage = 0.5m;
         Check(SettingsValidator.Validate(badLeverage).Errors.ContainsKey(nameof(AppSettings.Leverage)),
             "leverage below one is rejected");
+
+        var badSelection = CompleteProfile();
+        badSelection.Settings.CandidateSelectionMethod = "Unknown";
+        Check(SettingsValidator.Validate(badSelection).Errors.ContainsKey(nameof(AppSettings.CandidateSelectionMethod)),
+            "unknown candidate selection methods are rejected");
 
         var badInterval = CompleteProfile();
         badInterval.Settings.LimitOrderCheckMinutes = 0;
