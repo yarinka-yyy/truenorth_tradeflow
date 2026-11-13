@@ -3,6 +3,7 @@ using System.IO;
 using System.Threading;
 using System.Windows;
 using System.Windows.Threading;
+using Microsoft.Win32;
 using TrueNorth.TradeFlow.Notifications;
 using TrueNorth.TradeFlow.Recovery;
 using TrueNorth.TradeFlow.Trading;
@@ -15,11 +16,17 @@ public partial class App : System.Windows.Application
     private Mutex? _instanceMutex;
     private EventWaitHandle? _openEvent;
     private EventWaitHandle? _uninstallEvent;
+    private EventWaitHandle? _updateRequestEvent;
+    private EventWaitHandle? _updateReadyEvent;
+    private EventWaitHandle? _updateRefusedEvent;
+    private EventWaitHandle? _updateCommitEvent;
+    private EventWaitHandle? _updateCancelEvent;
     private EventWaitHandle? _recoveryReadyEvent;
     private EventWaitHandle? _recoveryStopEvent;
     private EventWaitHandle? _recoveryDisableEvent;
     private RegisteredWaitHandle? _openWait;
     private RegisteredWaitHandle? _uninstallWait;
+    private RegisteredWaitHandle? _updateRequestWait;
     private RegisteredWaitHandle? _testStopWait;
     private RegisteredWaitHandle? _testDisableWait;
     private RegisteredWaitHandle? _testSessionEndingWait;
@@ -42,6 +49,7 @@ public partial class App : System.Windows.Application
     private bool _ownsMutex;
     private bool _isClosing;
     private bool _exitConfirmationOpen;
+    private int _updatePreparationActive;
     private bool _recoveryTestHost;
     private string? _processRecoveryStatus;
 
@@ -104,6 +112,15 @@ public partial class App : System.Windows.Application
             _testOpenSignalEvent = new EventWaitHandle(false, EventResetMode.AutoReset,
                 recoveryScope.TestOpenSignalEventName);
         _uninstallEvent = new EventWaitHandle(false, EventResetMode.AutoReset, recoveryScope.UninstallEventName);
+        _updateRequestEvent = new EventWaitHandle(false, EventResetMode.AutoReset, recoveryScope.UpdateRequestEventName);
+        _updateReadyEvent = new EventWaitHandle(false, EventResetMode.ManualReset, recoveryScope.UpdateReadyEventName);
+        _updateRefusedEvent = new EventWaitHandle(false, EventResetMode.ManualReset, recoveryScope.UpdateRefusedEventName);
+        _updateCommitEvent = new EventWaitHandle(false, EventResetMode.ManualReset, recoveryScope.UpdateCommitEventName);
+        _updateCancelEvent = new EventWaitHandle(false, EventResetMode.ManualReset, recoveryScope.UpdateCancelEventName);
+        _updateReadyEvent.Reset();
+        _updateRefusedEvent.Reset();
+        _updateCommitEvent.Reset();
+        _updateCancelEvent.Reset();
         _openWait = ThreadPool.RegisterWaitForSingleObject(_openEvent, (_, timedOut) =>
         {
             if (!timedOut)
@@ -121,6 +138,20 @@ public partial class App : System.Windows.Application
         {
             if (!timedOut)
                 Dispatcher.BeginInvoke(new Action(ShutdownCleanly));
+        }, null, Timeout.Infinite, executeOnlyOnce: false);
+        _updateRequestWait = ThreadPool.RegisterWaitForSingleObject(_updateRequestEvent, (_, timedOut) =>
+        {
+            if (!timedOut)
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    if (_recoveryTestHost
+                        && arguments.Contains("--recovery-test-update-ignore", StringComparer.OrdinalIgnoreCase))
+                        return;
+                    if (_recoveryTestHost)
+                        _ = CompleteTestUpdateRequestAsync(arguments, recoveryScope);
+                    else
+                        _ = PrepareForPlannedUpdateAsync(recoveryScope);
+                }));
         }, null, Timeout.Infinite, executeOnlyOnce: false);
 
         _processRestartBudget = new ProcessRestartBudgetStore(recoveryScope.ProcessRestartBudgetPath);
@@ -368,10 +399,154 @@ public partial class App : System.Windows.Application
         StopForPlannedSessionEnding();
     }
 
-    internal void PrepareForPlannedUpdate()
+    private async Task PrepareForPlannedUpdateAsync(ProcessRecoveryScope scope)
     {
-        _processRecoveryScope?.DisableRecovery();
-        ShutdownCleanly();
+        if (_isClosing || Interlocked.Exchange(ref _updatePreparationActive, 1) != 0)
+            return;
+
+        var scenario = _localTradingScenario;
+        using var cancellation = new CancellationTokenSource();
+        var cancellationWait = ThreadPool.RegisterWaitForSingleObject(_updateCancelEvent!, (_, timedOut) =>
+        {
+            if (!timedOut)
+                cancellation.Cancel();
+        }, null, Timeout.Infinite, executeOnlyOnce: true);
+        try
+        {
+            if (!IsRegisteredProductInstance()
+                || scenario is null || !scenario.IsReady || _recoveryCoordinator?.StorageReady != true)
+            {
+                _updateRefusedEvent?.Set();
+                ShowMainWindow();
+                return;
+            }
+
+            var prepared = await scenario.PrepareForPlannedUpdateAsync(cancellation.Token);
+            if (!prepared.Succeeded)
+            {
+                await scenario.ResumeAfterPlannedUpdateAsync();
+                _updateRefusedEvent?.Set();
+                ShowMainWindow();
+                return;
+            }
+
+            _updateReadyEvent?.Set();
+            var decision = await Task.Run(() => WaitHandle.WaitAny(
+                [_updateCommitEvent!, _updateCancelEvent!], TimeSpan.FromSeconds(45)));
+            if (decision != 0 || cancellation.IsCancellationRequested)
+            {
+                await scenario.ResumeAfterPlannedUpdateAsync();
+                _updateRefusedEvent?.Set();
+                ShowMainWindow();
+                return;
+            }
+
+            scope.DisableRecovery();
+            _recoveryStopEvent?.Set();
+            ShutdownCleanly();
+        }
+        catch (Exception exception) when (exception is OperationCanceledException or IOException
+                                           or UnauthorizedAccessException or InvalidOperationException
+                                           or TimeoutException)
+        {
+            if (scenario is not null)
+                await scenario.ResumeAfterPlannedUpdateAsync();
+            _updateRefusedEvent?.Set();
+            ShowMainWindow();
+        }
+        finally
+        {
+            cancellationWait.Unregister(null);
+            if (!_isClosing)
+            {
+                _updateReadyEvent?.Reset();
+                _updateCommitEvent?.Reset();
+                _updateCancelEvent?.Reset();
+                Interlocked.Exchange(ref _updatePreparationActive, 0);
+            }
+        }
+    }
+
+    private static bool IsRegisteredProductInstance()
+    {
+        if (string.IsNullOrWhiteSpace(Environment.ProcessPath))
+            return false;
+
+        try
+        {
+            using var registration = Registry.CurrentUser.OpenSubKey(
+                ProcessRecoveryProductIdentity.UninstallRegistryKey, writable: false);
+            return registration is not null
+                && ProcessRecoveryProductIdentity.Matches(Environment.ProcessPath,
+                    registration.GetValue("DisplayName") as string,
+                    registration.GetValue("InstallLocation") as string);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException
+                                           or System.Security.SecurityException)
+        {
+            return false;
+        }
+    }
+
+    private async Task CompleteTestUpdateRequestAsync(string[] arguments, ProcessRecoveryScope scope)
+    {
+        if (_isClosing || Interlocked.Exchange(ref _updatePreparationActive, 1) != 0)
+            return;
+
+        try
+        {
+            if (_updateCancelEvent!.WaitOne(0))
+            {
+                _updateRefusedEvent?.Set();
+                scope.LogRuntime($"update-cancelled pid={Environment.ProcessId} before preparation");
+                return;
+            }
+            if (arguments.Contains("--recovery-test-update-refuse", StringComparer.OrdinalIgnoreCase))
+            {
+                scope.LogRuntime($"update-refused pid={Environment.ProcessId}");
+                _updateRefusedEvent?.Set();
+                return;
+            }
+            scope.LogRuntime($"update-preparing pid={Environment.ProcessId}");
+            if (arguments.Contains("--recovery-test-update-delay", StringComparer.OrdinalIgnoreCase))
+            {
+                using var delay = new ManualResetEvent(false);
+                var delayed = await Task.Run(() => WaitHandle.WaitAny(
+                    [_updateCancelEvent, delay], TimeSpan.FromSeconds(5)));
+                if (delayed == 0 || _updateCancelEvent.WaitOne(0))
+                {
+                    scope.LogRuntime($"update-cancelled pid={Environment.ProcessId} during preparation");
+                    _updateRefusedEvent?.Set();
+                    return;
+                }
+            }
+
+            scope.LogRuntime($"update-ready pid={Environment.ProcessId}");
+            _updateReadyEvent?.Set();
+            var decision = await Task.Run(() => WaitHandle.WaitAny(
+                [_updateCommitEvent!, _updateCancelEvent!], TimeSpan.FromSeconds(45)));
+            if (decision != 0 || _updateCancelEvent.WaitOne(0))
+            {
+                scope.LogRuntime($"update-cancelled pid={Environment.ProcessId} after preparation");
+                _updateRefusedEvent?.Set();
+                return;
+            }
+
+            scope.LogRuntime($"update-committed pid={Environment.ProcessId}");
+            scope.DisableRecovery();
+            _recoveryStopEvent?.Set();
+            ShutdownCleanly();
+        }
+        finally
+        {
+            if (!_isClosing)
+            {
+                _updateReadyEvent?.Reset();
+                _updateCommitEvent?.Reset();
+                _updateCancelEvent?.Reset();
+                Interlocked.Exchange(ref _updatePreparationActive, 0);
+            }
+        }
     }
 
     private void StopForPlannedSessionEnding()
@@ -410,8 +585,14 @@ public partial class App : System.Windows.Application
         _testConfirmedExitWait?.Unregister(null);
         _openWait?.Unregister(null);
         _uninstallWait?.Unregister(null);
+        _updateRequestWait?.Unregister(null);
         _openEvent?.Dispose();
         _uninstallEvent?.Dispose();
+        _updateRequestEvent?.Dispose();
+        _updateReadyEvent?.Dispose();
+        _updateRefusedEvent?.Dispose();
+        _updateCommitEvent?.Dispose();
+        _updateCancelEvent?.Dispose();
         _recoveryReadyEvent?.Dispose();
         _recoveryStopEvent?.Dispose();
         _recoveryDisableEvent?.Dispose();

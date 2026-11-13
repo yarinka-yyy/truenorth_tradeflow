@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.IO;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Automation;
@@ -9,6 +10,9 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
+using TrueNorth.TradeFlow.Notifications;
+using TrueNorth.TradeFlow.Recovery;
+using TrueNorth.TradeFlow.Trading;
 
 namespace TrueNorth.TradeFlow.Verification;
 
@@ -98,6 +102,7 @@ internal static class Program
             CheckMalformedAndRecovery(fixtureRoot);
             CheckUnsupportedAndUnavailable(fixtureRoot);
             CheckFailedWriteKeepsLastGood(fixtureRoot);
+            CheckPlan012PersistentDataFixture(Check, fixtureRoot);
             TrueNorthSessionChecks.CheckMarkerClassifier(Check);
             TrueNorthSessionChecks.CheckTransportAsync(Check, TrueNorthSessionChecks.ArtifactsDirectory()).GetAwaiter().GetResult();
             SimulationChecks.CheckScenarios(Check);
@@ -912,6 +917,48 @@ internal static class Program
         profile.Settings.MarginBalancePercent = percent;
         return profile;
     }
+
+    private static void CheckPlan012PersistentDataFixture(Action<bool, string> check, string root)
+    {
+        var profileRoot = Path.Combine(root, "plan-012-profile-copy");
+        var settingsPath = Path.Combine(profileRoot, "settings.json");
+        Directory.CreateDirectory(Path.Combine(profileRoot, "TestReports"));
+        Directory.CreateDirectory(Path.Combine(profileRoot, "Browser", "Edge"));
+        File.WriteAllText(Path.Combine(profileRoot, "TestReports", "fixture.txt"), "synthetic test report");
+        File.WriteAllText(Path.Combine(profileRoot, "Browser", "Edge", "fixture.txt"), "synthetic browser profile marker");
+
+        var settings = new SettingsStore(settingsPath);
+        var firstSave = settings.Save(CompleteProfile());
+        var secondSave = settings.Save(CompleteProfileWithPercent(13m));
+        var journal = new RecoveryJournalStore(Path.Combine(profileRoot, "recovery-state.json"));
+        var journalFirstSave = journal.Save(new RecoveryJournalState());
+        var journalSecondSave = journal.Save(new RecoveryJournalState());
+        var restartAttempt = new ProcessRestartBudgetStore(Path.Combine(profileRoot, "process-recovery-state.json"))
+            .TryBeginAttempt(ProcessRecoveryKind.Application);
+        var credentials = new TelegramCredentialStore(Path.Combine(profileRoot, "telegram-credentials.dat"));
+        var credentialsSaved = credentials.SavePair("123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef", "123456789", enabled: false);
+        using var scenario = new LocalTradingScenario(LocalTradingScenario.DefaultDirectory(profileRoot),
+            CompleteProfile(), automaticScheduling: false);
+
+        var filesBefore = HashDirectory(profileRoot);
+        var prepared = scenario.PrepareForPlannedUpdateAsync().GetAwaiter().GetResult();
+        var filesAfter = HashDirectory(profileRoot);
+        var credentialsReloaded = new TelegramCredentialStore(Path.Combine(profileRoot, "telegram-credentials.dat"))
+            .TryLoad(out var savedCredentials, out var enabled);
+        check(firstSave.Succeeded && secondSave.Succeeded && File.Exists(settingsPath + ".bak")
+              && journalFirstSave.Saved && journalSecondSave.Saved && File.Exists(journal.PreviousVersionPath)
+              && restartAttempt.Kind == ProcessRestartDecisionKind.Started
+              && credentialsSaved && credentialsReloaded && savedCredentials is not null && !enabled
+              && prepared.Succeeded && filesBefore.SequenceEqual(filesAfter),
+            $"offline update preparation preserves settings and backup, recovery journals, process state, DPAPI credentials, Edge marker, TestReports, and local-trading-scenario ({filesBefore.Count} files)");
+    }
+
+    private static IReadOnlyList<(string Path, string Hash)> HashDirectory(string root) =>
+        Directory.GetFiles(root, "*", SearchOption.AllDirectories)
+            .Select(path => (Path.GetRelativePath(root, path), Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path)))))
+            .OrderBy(file => file.Item1, StringComparer.OrdinalIgnoreCase)
+            .Select(file => (file.Item1, file.Item2))
+            .ToArray();
 
     private static bool ProfilesEqual(SettingsProfile expected, SettingsProfile actual)
     {

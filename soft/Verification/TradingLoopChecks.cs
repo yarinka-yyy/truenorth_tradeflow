@@ -50,6 +50,7 @@ internal static class TradingLoopChecks
         await CheckLocalScenarioJourney(check, Path.Combine(root, "trading-loop-local-journey"));
         await CheckLocalScenarioStopAndTest(check, Path.Combine(root, "trading-loop-local-stop"));
         await CheckLocalScenarioExit(check, Path.Combine(root, "trading-loop-local-exit"));
+        await CheckLocalScenarioPlannedUpdate(check, Path.Combine(root, "trading-loop-local-update"));
         await CheckLocalScenarioDeadlineWake(check, Path.Combine(root, "trading-loop-local-deadline"));
         await CheckLocalScenarioFallbackDeadline(check, Path.Combine(root, "trading-loop-local-fallback-deadline"));
         await CheckLocalScenarioHeldDeadline(check, Path.Combine(root, "trading-loop-local-held-deadline"));
@@ -196,6 +197,57 @@ internal static class TradingLoopChecks
               && restarted.Loop.Profile.SavedOperatingIntent && restarted.SyntheticAiRequestCount == 0
               && !recovery.Succeeded,
             "restart after an unknown exit cancellation reconciles the same local order and never resends entry");
+    }
+
+    private static async Task CheckLocalScenarioPlannedUpdate(Action<bool, string> check, string root)
+    {
+        var profile = LocalScenarioProfile("Limit");
+        var clock = new FakeClock(InitialTime);
+        var scenarioRoot = Path.Combine(root, "preserved-profile");
+        string? expectedOrderId = null;
+        string? expectedPositionId = null;
+        using (var scenario = new LocalTradingScenario(scenarioRoot, profile, clock, automaticScheduling: false))
+        {
+            await scenario.StartAsync(profile);
+            await scenario.RunOnceAsync();
+            var order = scenario.SyntheticOpenOrders.Single();
+            var position = scenario.SyntheticPositions.Single();
+            expectedOrderId = order.OrderId;
+            expectedPositionId = position.PositionId;
+            var requestCount = scenario.SyntheticAiRequestCount;
+            var savedOperations = new RecoveryJournalStore(scenario.JournalPath).Load().State.Operations
+                .Select(operation => (operation.OperationId, operation.Stage, operation.ActionKind)).ToArray();
+
+            var prepared = await scenario.PrepareForPlannedUpdateAsync();
+            var savedProfile = new SettingsStore(scenario.SettingsPath).Load();
+            var savedState = new RecoveryJournalStore(scenario.JournalPath).Load().State;
+            check(prepared.Succeeded && scenario.Loop.IsExitHeld && !scenario.Loop.IsAdmitting
+                  && scenario.HasSavedStart && savedProfile.Profile.SavedOperatingIntent
+                  && scenario.SyntheticOpenOrders.Single().OrderId == order.OrderId
+                  && scenario.SyntheticPositions.Single().PositionId == position.PositionId
+                  && scenario.SyntheticAiRequestCount == requestCount
+                  && savedState.Operations.Select(operation => (operation.OperationId, operation.Stage, operation.ActionKind))
+                      .SequenceEqual(savedOperations),
+                "planned update holds admission without changing Start, cancelling the open order, closing the position, or adding journal operations");
+
+            var resumed = await scenario.ResumeAfterPlannedUpdateAsync();
+            check(resumed.Succeeded && !scenario.Loop.IsExitHeld && scenario.Loop.IsAdmitting
+                  && scenario.HasSavedStart && scenario.SyntheticOpenOrders.Single().OrderId == order.OrderId
+                  && scenario.SyntheticPositions.Single().PositionId == position.PositionId,
+                "cancelled planned update reconciles before restoring the saved Start intent and scheduler");
+
+            await scenario.PrepareForPlannedUpdateAsync();
+        }
+
+        using var restarted = new LocalTradingScenario(scenarioRoot, profile, clock, automaticScheduling: false);
+        var recovery = await restarted.ResumeAsync();
+        check(restarted.HasSavedStart && restarted.SyntheticOpenOrders.Count == 1
+              && restarted.SyntheticOpenOrders.Single().OrderId == expectedOrderId
+              && restarted.SyntheticPositions.Count == 1
+              && restarted.SyntheticPositions.Single().PositionId == expectedPositionId
+              && restarted.SyntheticAiRequestCount == 0
+              && recovery.Succeeded,
+            "restart after planned update reads the same open order and position before admitting entries");
     }
 
     private static async Task CheckLocalScenarioDeadlineWake(Action<bool, string> check, string root)

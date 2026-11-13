@@ -65,6 +65,11 @@ internal sealed class ProcessRecoveryScope
         ApplicationMutexName = @"Local\TrueNorth.TradeFlow" + suffix;
         OpenEventName = @"Local\TrueNorth.TradeFlow.Open" + suffix;
         UninstallEventName = @"Local\TrueNorth.TradeFlow.Uninstall" + suffix;
+        UpdateRequestEventName = @"Local\TrueNorth.TradeFlow.UpdateRequest" + suffix;
+        UpdateReadyEventName = @"Local\TrueNorth.TradeFlow.UpdateReady" + suffix;
+        UpdateRefusedEventName = @"Local\TrueNorth.TradeFlow.UpdateRefused" + suffix;
+        UpdateCommitEventName = @"Local\TrueNorth.TradeFlow.UpdateCommit" + suffix;
+        UpdateCancelEventName = @"Local\TrueNorth.TradeFlow.UpdateCancel" + suffix;
         ObserverMutexName = @"Local\TrueNorth.TradeFlow.RecoveryObserver" + suffix;
         DisableEventName = @"Local\TrueNorth.TradeFlow.RecoveryDisable" + suffix;
         ObserverReadyEventName = @"Local\TrueNorth.TradeFlow.RecoveryObserverReady" + suffix;
@@ -81,6 +86,11 @@ internal sealed class ProcessRecoveryScope
     internal string ApplicationMutexName { get; }
     internal string OpenEventName { get; }
     internal string UninstallEventName { get; }
+    internal string UpdateRequestEventName { get; }
+    internal string UpdateReadyEventName { get; }
+    internal string UpdateRefusedEventName { get; }
+    internal string UpdateCommitEventName { get; }
+    internal string UpdateCancelEventName { get; }
     internal string ObserverMutexName { get; }
     internal string DisableEventName { get; }
     internal string ObserverReadyEventName { get; }
@@ -183,6 +193,44 @@ internal sealed class ProcessRecoveryScope
     private string ScopeSuffix => Isolated
         ? "." + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(ProfileRoot)))[..16]
         : string.Empty;
+}
+
+internal static class ProcessRecoveryProductIdentity
+{
+    internal const string DisplayName = "TrueNorth TradeFlow";
+    internal const string UninstallRegistryKey =
+        @"Software\Microsoft\Windows\CurrentVersion\Uninstall\{72A12E93-00C7-4EA7-96F1-EA8966A77931}_is1";
+    internal const string ExecutableName = "TrueNorth.TradeFlow.exe";
+
+    internal static bool Matches(string? executablePath, string? registeredDisplayName, string? registeredInstallLocation)
+    {
+        if (string.IsNullOrWhiteSpace(executablePath)
+            || !string.Equals(registeredDisplayName, DisplayName, StringComparison.Ordinal)
+            || string.IsNullOrWhiteSpace(registeredInstallLocation))
+            return false;
+
+        try
+        {
+            if (!Path.IsPathFullyQualified(executablePath)
+                || !Path.IsPathFullyQualified(registeredInstallLocation))
+                return false;
+
+            var installLocation = Path.GetFullPath(registeredInstallLocation);
+            var root = Path.GetPathRoot(installLocation);
+            if (string.IsNullOrWhiteSpace(root)
+                || installLocation.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).Length <= root.Length)
+                return false;
+
+            var registeredExecutable = Path.GetFullPath(Path.Combine(installLocation, ExecutableName));
+            return string.Equals(Path.GetFullPath(executablePath), registeredExecutable,
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException or NotSupportedException
+                                           or System.Security.SecurityException)
+        {
+            return false;
+        }
+    }
 }
 
 internal sealed class ProcessRestartBudgetStore

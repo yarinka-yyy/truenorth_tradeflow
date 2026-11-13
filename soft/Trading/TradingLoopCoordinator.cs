@@ -106,13 +106,13 @@ internal sealed class TradingLoopCoordinator
         CancelActiveCycle();
     }
 
-    internal async Task HoldAdmissionForExitAsync()
+    internal async Task HoldAdmissionForExitAsync(CancellationToken cancellationToken = default)
     {
         CloseAdmissionForShutdown();
-        await _commandGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+        await _commandGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            await _cycleGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+            await _cycleGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             _cycleGate.Release();
         }
         finally

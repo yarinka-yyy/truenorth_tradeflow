@@ -23,6 +23,7 @@ internal static class ProcessRecoveryChecks
     {
         CheckBudgets(check, root);
         CheckTestProfileValidation(check, root);
+        CheckRegisteredProductIdentity(check, root);
         CheckReconciliationAndStop(check, root);
         CheckFailureEvent(check, root);
     }
@@ -38,10 +39,254 @@ internal static class ProcessRecoveryChecks
         if (string.IsNullOrWhiteSpace(configuredPath))
             throw new InvalidOperationException("Set TRUENORTH_TRADEFLOW_PROCESS_RECOVERY_EXE to the verified self-contained Release publish before --process-recovery-runtime.");
         var appHost = Path.GetFullPath(configuredPath);
+        var configuredBaseline = Environment.GetEnvironmentVariable("TRUENORTH_TRADEFLOW_PROCESS_RECOVERY_BASELINE_EXE");
+        if (string.IsNullOrWhiteSpace(configuredBaseline))
+            throw new InvalidOperationException("Set TRUENORTH_TRADEFLOW_PROCESS_RECOVERY_BASELINE_EXE to the verified 0.1.0 self-contained publish before --process-recovery-runtime.");
+        var baselineExe = Path.GetFullPath(configuredBaseline);
         CheckRejectedTestHost(check, appHost, root);
         CheckApplicationObserverRuntime(check, root);
+        CheckPlannedUpdateRuntime(check, appHost, root);
+        CheckLegacyManualShutdownRuntime(check, baselineExe, root);
         CheckManualPrimaryExitRace(check, appHost, root);
         CheckReplacementReadinessTimeout(check, appHost, root);
+    }
+
+    private static void CheckPlannedUpdateRuntime(Action<bool, string> check, string appHost, string root)
+    {
+        CheckCommittedUpdateRuntime(check, appHost, Path.Combine(root, "planned-update-commit"));
+        CheckRefusedUpdateRuntime(check, appHost, Path.Combine(root, "planned-update-refused"));
+        CheckTimedOutUpdateRuntime(check, appHost, Path.Combine(root, "planned-update-timeout"));
+        CheckCancelledUpdateRuntime(check, appHost, Path.Combine(root, "planned-update-cancelled"));
+    }
+
+    private static void CheckCommittedUpdateRuntime(Action<bool, string> check, string appHost, string profileRoot)
+    {
+        Directory.CreateDirectory(profileRoot);
+        var scope = ProcessRecoveryScope.Create(profileRoot);
+        var owned = new List<Process>();
+        Process? primary = null;
+        Process? observer = null;
+        try
+        {
+            primary = StartApplicationHost(appHost, profileRoot, startup: true);
+            owned.Add(primary);
+            CheckProcessReady(primary, scope, TimeSpan.FromSeconds(15));
+            check(WaitForNamedEvent(scope.ObserverReadyEventName, TimeSpan.FromSeconds(15)),
+                "the current app publishes its isolated recovery observer before update preparation");
+            var observerFields = WaitForLogEvent(scope.RuntimeLogPath!, "observer-start", TimeSpan.FromSeconds(5));
+            observer = Process.GetProcessById(int.Parse(observerFields["pid"], CultureInfo.InvariantCulture));
+            owned.Add(observer);
+
+            using var request = EventWaitHandle.OpenExisting(scope.UpdateRequestEventName);
+            using var ready = EventWaitHandle.OpenExisting(scope.UpdateReadyEventName);
+            using var refused = EventWaitHandle.OpenExisting(scope.UpdateRefusedEventName);
+            using var commit = EventWaitHandle.OpenExisting(scope.UpdateCommitEventName);
+            using var disable = EventWaitHandle.OpenExisting(scope.DisableEventName);
+            ready.Reset();
+            refused.Reset();
+            commit.Reset();
+            request.Set();
+            var readySignaled = ready.WaitOne(TimeSpan.FromSeconds(10));
+            var refusedSignaled = refused.WaitOne(0);
+            check(readySignaled && !refusedSignaled && !primary.HasExited,
+                "the current app confirms preparation and stays alive until the installer commits");
+            commit.Set();
+
+            var appExited = primary.WaitForExit(15000);
+            var observerExited = observer.WaitForExit(15000);
+            var committed = ReadLogEvents(scope.RuntimeLogPath!, "update-committed")
+                .Any(fields => fields.GetValueOrDefault("pid") == primary.Id.ToString(CultureInfo.InvariantCulture));
+            check(appExited && observerExited && disable.WaitOne(0)
+                  && committed && owned.All(process => process.WaitForExit(0)),
+                "committed update disables recovery, exits the owned app and observer, and leaves no restart");
+            Console.WriteLine($"PROCESS-UPDATE committed app={primary.Id} observer={observer.Id} exited={appExited}/{observerExited}");
+        }
+        finally
+        {
+            scope.DisableRecovery();
+            AddLoggedOwnedProcesses(owned, scope.RuntimeLogPath!, appHost);
+            CleanupOwnedProcesses(owned, appHost);
+        }
+    }
+
+    private static void CheckRefusedUpdateRuntime(Action<bool, string> check, string appHost, string profileRoot)
+    {
+        Directory.CreateDirectory(profileRoot);
+        var scope = ProcessRecoveryScope.Create(profileRoot);
+        var owned = new List<Process>();
+        Process? primary = null;
+        Process? observer = null;
+        try
+        {
+            primary = StartApplicationHost(appHost, profileRoot, startup: true, simulateConfirmedExit: true,
+                extraArguments: ["--recovery-test-update-refuse"]);
+            owned.Add(primary);
+            CheckProcessReady(primary, scope, TimeSpan.FromSeconds(15));
+            var observerFields = WaitForLogEvent(scope.RuntimeLogPath!, "observer-start", TimeSpan.FromSeconds(5));
+            observer = Process.GetProcessById(int.Parse(observerFields["pid"], CultureInfo.InvariantCulture));
+            owned.Add(observer);
+
+            using var request = EventWaitHandle.OpenExisting(scope.UpdateRequestEventName);
+            using var refused = EventWaitHandle.OpenExisting(scope.UpdateRefusedEventName);
+            using var disable = EventWaitHandle.OpenExisting(scope.DisableEventName);
+            request.Set();
+            var refusedSignaled = refused.WaitOne(TimeSpan.FromSeconds(5));
+            check(refusedSignaled && !primary.HasExited && !observer.HasExited && !disable.WaitOne(0),
+                "update refusal keeps the app and observer running without disabling recovery");
+            using (var confirmedExit = EventWaitHandle.OpenExisting(scope.TestConfirmedExitEventName))
+                confirmedExit.Set();
+            var appExited = primary.WaitForExit(10000);
+            var observerExited = observer.WaitForExit(10000);
+            check(appExited && observerExited,
+                "the refused update can be followed by the normal confirmed exit path");
+        }
+        finally
+        {
+            scope.DisableRecovery();
+            AddLoggedOwnedProcesses(owned, scope.RuntimeLogPath!, appHost);
+            CleanupOwnedProcesses(owned, appHost);
+        }
+    }
+
+    private static void CheckTimedOutUpdateRuntime(Action<bool, string> check, string appHost, string profileRoot)
+    {
+        Directory.CreateDirectory(profileRoot);
+        var scope = ProcessRecoveryScope.Create(profileRoot);
+        var owned = new List<Process>();
+        Process? primary = null;
+        Process? observer = null;
+        try
+        {
+            primary = StartApplicationHost(appHost, profileRoot, startup: true, simulateConfirmedExit: true,
+                extraArguments: ["--recovery-test-update-ignore"]);
+            owned.Add(primary);
+            CheckProcessReady(primary, scope, TimeSpan.FromSeconds(15));
+            var observerFields = WaitForLogEvent(scope.RuntimeLogPath!, "observer-start", TimeSpan.FromSeconds(5));
+            observer = Process.GetProcessById(int.Parse(observerFields["pid"], CultureInfo.InvariantCulture));
+            owned.Add(observer);
+
+            using var request = EventWaitHandle.OpenExisting(scope.UpdateRequestEventName);
+            using var ready = EventWaitHandle.OpenExisting(scope.UpdateReadyEventName);
+            using var refused = EventWaitHandle.OpenExisting(scope.UpdateRefusedEventName);
+            using var cancel = EventWaitHandle.OpenExisting(scope.UpdateCancelEventName);
+            request.Set();
+            var responseReceived = ready.WaitOne(500) || refused.WaitOne(0);
+            cancel.Set();
+            cancel.Reset();
+            check(!responseReceived && !primary.HasExited && !observer.HasExited
+                  && !ReadLogEvents(scope.RuntimeLogPath!, "update-committed").Any(),
+                "a preparation timeout cancels the request without closing the app late or stopping its observer");
+            using (var confirmedExit = EventWaitHandle.OpenExisting(scope.TestConfirmedExitEventName))
+                confirmedExit.Set();
+            check(primary.WaitForExit(10000) && observer.WaitForExit(10000),
+                "a timed-out update leaves the app available for a later normal exit");
+        }
+        finally
+        {
+            scope.DisableRecovery();
+            AddLoggedOwnedProcesses(owned, scope.RuntimeLogPath!, appHost);
+            CleanupOwnedProcesses(owned, appHost);
+        }
+    }
+
+    private static void CheckCancelledUpdateRuntime(Action<bool, string> check, string appHost, string profileRoot)
+    {
+        Directory.CreateDirectory(profileRoot);
+        var scope = ProcessRecoveryScope.Create(profileRoot);
+        var owned = new List<Process>();
+        Process? primary = null;
+        Process? observer = null;
+        try
+        {
+            primary = StartApplicationHost(appHost, profileRoot, startup: true, simulateConfirmedExit: true,
+                extraArguments: ["--recovery-test-update-delay"]);
+            owned.Add(primary);
+            CheckProcessReady(primary, scope, TimeSpan.FromSeconds(15));
+            var observerFields = WaitForLogEvent(scope.RuntimeLogPath!, "observer-start", TimeSpan.FromSeconds(5));
+            observer = Process.GetProcessById(int.Parse(observerFields["pid"], CultureInfo.InvariantCulture));
+            owned.Add(observer);
+
+            using var request = EventWaitHandle.OpenExisting(scope.UpdateRequestEventName);
+            using var cancel = EventWaitHandle.OpenExisting(scope.UpdateCancelEventName);
+            using var disable = EventWaitHandle.OpenExisting(scope.DisableEventName);
+            request.Set();
+            WaitForLogEvent(scope.RuntimeLogPath!, "update-preparing", TimeSpan.FromSeconds(5));
+            cancel.Set();
+            WaitForLogEvent(scope.RuntimeLogPath!, "update-cancelled", TimeSpan.FromSeconds(5));
+            Thread.Sleep(6000);
+            check(!primary.HasExited && !observer.HasExited && !disable.WaitOne(0)
+                  && !ReadLogEvents(scope.RuntimeLogPath!, "update-committed").Any(),
+                "cancelling before readiness prevents a delayed handler from shutting down after the setup timed out");
+            using (var confirmedExit = EventWaitHandle.OpenExisting(scope.TestConfirmedExitEventName))
+                confirmedExit.Set();
+            check(primary.WaitForExit(10000) && observer.WaitForExit(10000),
+                "a cancelled delayed update leaves both owned processes available for ordinary shutdown");
+        }
+        finally
+        {
+            scope.DisableRecovery();
+            AddLoggedOwnedProcesses(owned, scope.RuntimeLogPath!, appHost);
+            CleanupOwnedProcesses(owned, appHost);
+        }
+    }
+
+    private static void CheckLegacyManualShutdownRuntime(Action<bool, string> check, string baselineExe, string root)
+    {
+        var appHost = Path.GetFullPath(baselineExe);
+        var runtimeConfigPath = Path.Combine(Path.GetDirectoryName(appHost)!, "TrueNorth.TradeFlow.runtimeconfig.json");
+        if (!File.Exists(appHost) || !File.Exists(runtimeConfigPath) || !IsSelfContainedRuntimeConfig(runtimeConfigPath))
+            throw new InvalidOperationException($"Legacy process check requires the verified 0.1.0 self-contained executable: {appHost}");
+        if (FileVersionInfo.GetVersionInfo(appHost).FileVersion?.StartsWith("0.1.0.", StringComparison.Ordinal) != true)
+            throw new InvalidOperationException("The legacy process check executable is not file version 0.1.0.");
+
+        var profileRoot = Path.Combine(root, "legacy-manual-shutdown");
+        Directory.CreateDirectory(profileRoot);
+        var scope = ProcessRecoveryScope.Create(profileRoot);
+        var owned = new List<Process>();
+        Process? primary = null;
+        Process? observer = null;
+        try
+        {
+            primary = StartApplicationHost(appHost, profileRoot, startup: true, simulateConfirmedExit: true);
+            owned.Add(primary);
+            CheckProcessReady(primary, scope, TimeSpan.FromSeconds(15));
+            var observerFields = WaitForLogEvent(scope.RuntimeLogPath!, "observer-start", TimeSpan.FromSeconds(5));
+            observer = Process.GetProcessById(int.Parse(observerFields["pid"], CultureInfo.InvariantCulture));
+            owned.Add(observer);
+            using var disable = EventWaitHandle.OpenExisting(scope.DisableEventName);
+            using (var confirmedExit = EventWaitHandle.OpenExisting(scope.TestConfirmedExitEventName))
+                confirmedExit.Set();
+
+            var appExited = primary.WaitForExit(10000);
+            var observerExited = observer.WaitForExit(10000);
+            check(appExited && observerExited && disable.WaitOne(0)
+                  && ReadLogEvents(scope.RuntimeLogPath!, "planned-stop")
+                      .Any(fields => fields.GetValueOrDefault("pid") == primary.Id.ToString(CultureInfo.InvariantCulture)),
+                "baseline 0.1.0 normal exit disables its observer and leaves no automatic restart");
+
+            using var appMutex = new Mutex(false, scope.ApplicationMutexName);
+            using var observerMutex = new Mutex(false, scope.ObserverMutexName);
+            var appLocked = appMutex.WaitOne(0);
+            var observerLocked = observerMutex.WaitOne(0);
+            check(appLocked && observerLocked,
+                "the installer can hold both legacy process mutexes after owner-mediated shutdown");
+            if (appLocked && observerLocked)
+            {
+                using var duplicate = StartApplicationHost(appHost, profileRoot, startup: true);
+                check(duplicate.WaitForExit(10000) && duplicate.ExitCode == 0
+                      && ReadLogEvents(scope.RuntimeLogPath!, "host-ready").Count == 1,
+                    "holding the legacy app mutex prevents a late 0.1.0 startup during replacement");
+                observerMutex.ReleaseMutex();
+                appMutex.ReleaseMutex();
+            }
+            Console.WriteLine($"PROCESS-UPDATE legacy app={primary.Id} observer={observer.Id} exited={appExited}/{observerExited}");
+        }
+        finally
+        {
+            scope.DisableRecovery();
+            AddLoggedOwnedProcesses(owned, scope.RuntimeLogPath!, appHost);
+            CleanupOwnedProcesses(owned, appHost);
+        }
     }
 
     internal static void CheckNativeWpf(Action<bool, string> check, string root)
@@ -157,11 +402,26 @@ internal static class ProcessRecoveryChecks
         var signalWithoutHostAccepted = ProcessRecoveryStartupProfile.TryResolve(
             ["--recovery-test-session-ending", "--recovery-test-profile=" + safeProfile],
             out _, out _, out _);
+        var updateRefuseAccepted = ProcessRecoveryStartupProfile.TryResolve(
+            ["--recovery-test-host", "--recovery-test-update-refuse", "--recovery-test-profile=" + safeProfile],
+            out var updateRefuseHost, out _, out _);
+        var updateIgnoreAccepted = ProcessRecoveryStartupProfile.TryResolve(
+            ["--recovery-test-host", "--recovery-test-update-ignore", "--recovery-test-profile=" + safeProfile],
+            out var updateIgnoreHost, out _, out _);
+        var updateDelayAccepted = ProcessRecoveryStartupProfile.TryResolve(
+            ["--recovery-test-host", "--recovery-test-update-delay", "--recovery-test-profile=" + safeProfile],
+            out var updateDelayHost, out _, out _);
+        var updateSwitchWithoutHostAccepted = ProcessRecoveryStartupProfile.TryResolve(
+            ["--recovery-test-update-refuse", "--recovery-test-profile=" + safeProfile],
+            out _, out _, out _);
         var arbitraryProfileRead = ProcessRecoveryStartupProfile.TryResolve(
             ["--recovery-test-profile=" + safeProfile], out var ordinaryTestHost, out var ordinaryProfile, out _);
         check(!missingProfileAccepted && !signalWithoutHostAccepted
+              && updateRefuseAccepted && updateRefuseHost
+              && updateIgnoreAccepted && updateIgnoreHost
+              && updateDelayAccepted && updateDelayHost && !updateSwitchWithoutHostAccepted
               && arbitraryProfileRead && !ordinaryTestHost && ordinaryProfile is null,
-            "test recovery switches require the explicit isolated host and a random profile argument is ignored by normal startup");
+            "update test switches require the explicit isolated host and a random profile argument is ignored by normal startup");
 
         var productionAccepted = ProcessRecoveryStartupProfile.TryResolve(
             ["--recovery-test-host", "--recovery-test-profile=" + productionProfile], out _, out _, out _);
@@ -178,6 +438,21 @@ internal static class ProcessRecoveryChecks
               && isolatedAccepted && isolatedHost
               && string.Equals(Path.GetFullPath(safeProfile), isolatedPath, StringComparison.OrdinalIgnoreCase),
             "test profile validation rejects production LocalAppData, environment, extended-path, and dot-segment aliases before creating a process scope");
+    }
+
+    private static void CheckRegisteredProductIdentity(Action<bool, string> check, string root)
+    {
+        var installLocation = Path.Combine(root, "registered-product");
+        var installedExecutable = Path.Combine(installLocation, ProcessRecoveryProductIdentity.ExecutableName);
+        var portableExecutable = Path.Combine(root, "portable-copy", ProcessRecoveryProductIdentity.ExecutableName);
+        check(ProcessRecoveryProductIdentity.Matches(installedExecutable, ProcessRecoveryProductIdentity.DisplayName,
+                  installLocation)
+              && !ProcessRecoveryProductIdentity.Matches(portableExecutable,
+                  ProcessRecoveryProductIdentity.DisplayName, installLocation)
+              && !ProcessRecoveryProductIdentity.Matches(installedExecutable, "Other Product", installLocation)
+              && !ProcessRecoveryProductIdentity.Matches(installedExecutable,
+                  ProcessRecoveryProductIdentity.DisplayName, "relative-install-path"),
+            "only the exact executable registered for this AppId and product name can accept an update request");
     }
 
     private static void CheckReconciliationAndStop(Action<bool, string> check, string root)
@@ -376,8 +651,6 @@ internal static class ProcessRecoveryChecks
         var ignoredEnvironmentLog = Path.Combine(ignoredEnvironmentProfile, "process-recovery-runtime.log");
         var productionProfile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "TrueNorth TradeFlow");
-        var productionLog = Path.Combine(productionProfile, "process-recovery-runtime.log");
-        var productionLogBefore = ReadFileStamp(productionLog);
         var productionAlias = Path.Combine(Path.GetDirectoryName(productionProfile)!, ".", "TrueNorth TradeFlow", "..",
             "TrueNorth TradeFlow");
         var safeProfile = Path.Combine(root, "rejected-session-ending-profile");
@@ -393,10 +666,9 @@ internal static class ProcessRecoveryChecks
             ["--recovery-test-session-ending", "--recovery-test-profile=" + safeProfile], null);
         check(missingArgumentExit == 2 && productionPathExit == 2 && productionAliasExit == 2
               && sessionWithoutHostExit == 2
-              && !File.Exists(ignoredEnvironmentLog) && !File.Exists(safeLog)
-              && ReadFileStamp(productionLog) == productionLogBefore,
-            "invalid test switches exit before observer, mutex, or runtime-log creation; environment-only, production, and dot-segment profiles are rejected");
-        Console.WriteLine($"PROCESS-RECOVERY invalid-test-host exits={missingArgumentExit}/{productionPathExit}/{productionAliasExit}/{sessionWithoutHostExit} production-log-unchanged=true");
+              && !File.Exists(ignoredEnvironmentLog) && !File.Exists(safeLog),
+            "invalid test switches exit before observer, mutex, or isolated runtime-log creation; environment-only, production, and dot-segment profiles are rejected");
+        Console.WriteLine($"PROCESS-RECOVERY invalid-test-host exits={missingArgumentExit}/{productionPathExit}/{productionAliasExit}/{sessionWithoutHostExit} isolated-logs-absent=true");
     }
 
     private static int RunRejectedTestHost(string executable, IReadOnlyList<string> arguments, string? environmentProfile)
@@ -795,7 +1067,7 @@ internal static class ProcessRecoveryChecks
 
     private static Process StartApplicationHost(string executable, string profileRoot, bool startup,
         bool simulateSessionEnding = false, bool simulateConfirmedExit = false,
-        bool neverReadyOnRestart = false)
+        bool neverReadyOnRestart = false, string[]? extraArguments = null)
     {
         var start = new ProcessStartInfo(executable)
         {
@@ -815,6 +1087,9 @@ internal static class ProcessRecoveryChecks
             start.ArgumentList.Add("--recovery-test-confirmed-exit");
         if (neverReadyOnRestart)
             start.ArgumentList.Add("--recovery-test-never-ready-on-restart");
+        if (extraArguments is not null)
+            foreach (var argument in extraArguments)
+                start.ArgumentList.Add(argument);
         return Process.Start(start)
             ?? throw new InvalidOperationException("The isolated application host did not start.");
     }

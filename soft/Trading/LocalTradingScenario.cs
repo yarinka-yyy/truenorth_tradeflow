@@ -63,7 +63,7 @@ internal sealed class LocalTradingScenario : IDisposable
     private readonly LocalScenarioAiSource _aiSource;
     private readonly Func<TimeSpan, CancellationToken, Task> _delay;
     private readonly bool _automaticScheduling;
-    private readonly CancellationTokenSource _shutdown = new();
+    private CancellationTokenSource _shutdown = new();
     private readonly object _wakeGate = new();
     private TaskCompletionSource _wake = NewWakeSource();
     private Task? _worker;
@@ -310,6 +310,72 @@ internal sealed class LocalTradingScenario : IDisposable
         var status = reconciliation.Succeeded ? snapshot.Status
             : reconciliation.Status + " " + snapshot.Status;
         return snapshot with { Status = status, CancellationResults = _exitCancellationResults };
+    }
+
+    internal async Task<TradingLoopOutcome> PrepareForPlannedUpdateAsync(
+        CancellationToken cancellationToken = default)
+    {
+        if (_disposed || _initializationFailure is not null)
+            return new(false, _initializationFailure ?? "Локальный сценарий уже завершён.");
+
+        try
+        {
+            await _loop.HoldAdmissionForExitAsync(cancellationToken).ConfigureAwait(false);
+            var profile = _settingsStore.Load();
+            var journal = _journalStore.Load();
+            if (!_recovery.StorageReady || profile.Status != SettingsFileStatus.Loaded
+                || profile.Profile.SavedOperatingIntent != _loop.Profile.SavedOperatingIntent
+                || journal.Status is not (RecoveryJournalStatus.Loaded or RecoveryJournalStatus.Missing))
+                return new(false, "Состояние профиля или журнал восстановления нельзя подтвердить; обновление остановлено.");
+
+            _shutdown.Cancel();
+            SignalWorker();
+            if (_worker is not null)
+                await _worker.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken).ConfigureAwait(false);
+            return new(true, "Новые входы приостановлены; журнал и намерение Start/Stop сохранены.");
+        }
+        catch (TimeoutException)
+        {
+            return new(false, "Локальный цикл не завершился за отведённое время; обновление остановлено.");
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return new(false, "Подготовка обновления отменена; обновление остановлено.");
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException
+                                           or System.Security.SecurityException)
+        {
+            return new(false, "Не удалось подтвердить сохранение состояния; обновление остановлено.");
+        }
+    }
+
+    internal async Task<TradingLoopOutcome> ResumeAfterPlannedUpdateAsync(
+        CancellationToken cancellationToken = default)
+    {
+        if (_disposed)
+            return new(false, "Локальный сценарий уже завершён.");
+
+        var result = await _loop.ResumeAfterExitAsync(cancellationToken).ConfigureAwait(false);
+        if (_shutdown.IsCancellationRequested && _worker is { IsCompleted: false })
+        {
+            try
+            {
+                await _worker.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+                return new(false, "Локальный планировщик не завершился после отмены обновления.");
+            }
+        }
+
+        if (_automaticScheduling && _shutdown.IsCancellationRequested)
+        {
+            _shutdown.Dispose();
+            _shutdown = new CancellationTokenSource();
+            _worker = RunSchedulerAsync(_shutdown.Token);
+            SignalWorker(runImmediately: result.Succeeded);
+        }
+        return result;
     }
 
     internal async Task<LocalScenarioExitResult> CancelOpenEntriesForExitAsync(

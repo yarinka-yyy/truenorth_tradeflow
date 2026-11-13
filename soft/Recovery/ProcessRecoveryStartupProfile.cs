@@ -14,7 +14,10 @@ internal static class ProcessRecoveryStartupProfile
         "--recovery-test-session-ending",
         "--recovery-test-confirmed-exit",
         "--recovery-test-never-ready",
-        "--recovery-test-never-ready-on-restart"
+        "--recovery-test-never-ready-on-restart",
+        "--recovery-test-update-refuse",
+        "--recovery-test-update-ignore",
+        "--recovery-test-update-delay"
     ];
 
     internal static bool TryResolve(string[] arguments, out bool testHost, out string? profileRoot,
