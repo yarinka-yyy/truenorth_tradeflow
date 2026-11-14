@@ -315,7 +315,7 @@ internal sealed class OrderLifecycleCoordinator
             return new(false, "Для входа нет свежего точного снимка счёта.", state.IntentId);
         }
 
-        if (!TryEvaluateEligibility(intent, eligibilityInput, preflightAccount, now, out var freshEligibility)
+        if (!TryEvaluateEligibility(intent, eligibilityInput, preflightAccount, _clock.UtcNow, out var freshEligibility)
             || freshEligibility is null)
         {
             await _recovery.ReportFailureAsync(intent.Venue, intent.Account,
@@ -503,14 +503,18 @@ internal sealed class OrderLifecycleCoordinator
         }
         if (state.ManagementMode == ManagedOrderManagementMode.Manual)
             return Blocked("Позиция и остаток переданы владельцу; действий приложения нет.", intentId);
+        if (IsUnsentEntry(state))
+            return await RetireUnsentEntryAsync(state, cancellationToken).ConfigureAwait(false);
         if (state.Status == ManagedOrderStatus.EmergencyCloseWaiting
             && state.NextEmergencyCloseAt is { } emergencyDue && emergencyDue <= _clock.UtcNow)
             return await RunDueEmergencyCloseCoreAsync(intentId, savedOperatingIntent: false, cancellationToken)
                 .ConfigureAwait(false);
 
-        var partialWithoutDeadline = state.EntryTerminalState == ManagedEntryTerminalState.Open
+        var partialWithoutDeadline = !state.PartialFillCancelAttempted
+            && state.EntryTerminalState == ManagedEntryTerminalState.Open
             && state.FilledQuantity > 0m && state.FirstPartialFillAt is null;
-        var cancelDue = state.PartialFillCancelAt is { } cancelAt && cancelAt <= _clock.UtcNow;
+        var cancelDue = !state.PartialFillCancelAttempted
+            && state.PartialFillCancelAt is { } cancelAt && cancelAt <= _clock.UtcNow;
         var checkDue = force || state.NextManagementCheckAt is null || state.NextManagementCheckAt <= _clock.UtcNow;
         if (!partialWithoutDeadline && !cancelDue && !checkDue)
             return new(false, "Проверка ещё не наступила.", intentId);
@@ -563,12 +567,10 @@ internal sealed class OrderLifecycleCoordinator
                 return repair;
         }
 
-        if (progress.EntryRemainder > 0m
+        if (!state.PartialFillCancelAttempted && progress.EntryRemainder > 0m
             && (firstFillUnknown || state.PartialFillCancelAt is { } deadline && deadline <= _clock.UtcNow
                 || takeProfitClosed || stopLossClosed))
         {
-            if (state.PartialFillCancelAttempted)
-                return Blocked("Точная отмена уже отправлялась; автоматический повтор заблокирован.", intentId);
             state = await SaveFailureNoteAsync(state,
                 firstFillUnknown
                     ? "Время первого исполнения не подтверждено; отменяется только свежесверенный остаток."
@@ -600,6 +602,8 @@ internal sealed class OrderLifecycleCoordinator
 
         if (progress.Position is null)
         {
+            if (progress.EntryRemainder > 0m && state.PartialFillCancelAttempted)
+                return Blocked("Точная отмена уже отправлялась; автоматический повтор заблокирован.", intentId);
             if (HasVerifiedPositionClosure(progress))
             {
                 var closedPosition = await SaveAsync(state, cancellationToken).ConfigureAwait(false);
@@ -822,6 +826,11 @@ internal sealed class OrderLifecycleCoordinator
             }
             if (state.ManagementMode == ManagedOrderManagementMode.Manual)
                 continue;
+            if (IsUnsentEntry(state))
+            {
+                results.Add(await RetireUnsentEntryAsync(state, cancellationToken).ConfigureAwait(false));
+                continue;
+            }
             if (state.Status == ManagedOrderStatus.EmergencyCloseWaiting)
             {
                 results.Add(state.NextEmergencyCloseAt is { } due && due <= _clock.UtcNow
@@ -853,13 +862,15 @@ internal sealed class OrderLifecycleCoordinator
                 continue;
             }
             state = saved;
-            if (progress.EntryRemainder > 0m)
+            if (progress.EntryRemainder > 0m && !state.PartialFillCancelAttempted)
                 results.Add(await CancelRemainderCoreAsync(state.IntentId, savedOperatingIntent: false,
                     cancellationToken).ConfigureAwait(false));
             else if (progress.Position is not null
                 && state.ManagementMode == ManagedOrderManagementMode.Application)
                 results.Add(await RepairProtectionCoreAsync(state, savedOperatingIntent: false, cancellationToken)
                     .ConfigureAwait(false));
+            if (progress.EntryRemainder > 0m && state.PartialFillCancelAttempted)
+                results.Add(Blocked("Ранее отправленная отмена не закрыла остаток заявки.", state.IntentId));
         }
         return results.FirstOrDefault(result => !result.Succeeded)
             ?? new(true, "Точные остатки отменены; открытые позиции сверены и защищены.");
@@ -915,6 +926,10 @@ internal sealed class OrderLifecycleCoordinator
         state = refreshedState;
         if (progress.EntryRemainder > 0m || state.EntryTerminalState == ManagedEntryTerminalState.Open)
         {
+            if (state.PartialFillCancelAttempted)
+                return await BlockAndReconcileAsync(state,
+                    "Закрытие запрещено: предыдущая отмена не закрыла остаток заявки.", cancellationToken)
+                    .ConfigureAwait(false);
             var cancelled = await CancelRemainderCoreAsync(state.IntentId, savedOperatingIntent: false,
                 cancellationToken, repairAfterCancel: false).ConfigureAwait(false);
             state = Find(intentId)!;
@@ -1666,6 +1681,10 @@ internal sealed class OrderLifecycleCoordinator
 
         if (progress.EntryRemainder > 0m || state.EntryTerminalState == ManagedEntryTerminalState.Open)
         {
+            if (state.PartialFillCancelAttempted)
+                return await BlockAndReconcileAsync(state,
+                    "Закрытие запрещено: предыдущая отмена не закрыла остаток заявки.", cancellationToken)
+                    .ConfigureAwait(false);
             var cancelled = await CancelRemainderCoreAsync(state.IntentId, savedOperatingIntent: false,
                 cancellationToken, repairAfterCancel: false).ConfigureAwait(false);
             state = Find(state.IntentId)!;
@@ -1924,7 +1943,7 @@ internal sealed class OrderLifecycleCoordinator
                 : state.NextManagementCheckAt is { } next && next > now
                 ? next : now.AddMinutes(interval)
             : null;
-        if (cancelAt is { } deadline && progress.EntryRemainder > 0m
+        if (!state.PartialFillCancelAttempted && cancelAt is { } deadline && progress.EntryRemainder > 0m
             && (nextCheckAt is null || deadline < nextCheckAt))
             nextCheckAt = deadline;
         var status = state.PendingOperationId is not null ? ManagedOrderStatus.ReconciliationRequired
@@ -2670,6 +2689,30 @@ internal sealed class OrderLifecycleCoordinator
 
     private ManagedOrderState? Find(string intentId) =>
         _recovery.State.ManagedOrders.SingleOrDefault(order => order.IntentId == intentId);
+
+    private bool IsUnsentEntry(ManagedOrderState state) =>
+        state.EntryTerminalState == ManagedEntryTerminalState.NotSubmitted
+        && state.PendingOperationId is null && state.LastAppliedOperationId is null
+        && state.OriginEntryOperationId is null && state.PositionId is null
+        && !_recovery.State.Operations.Any(operation =>
+            operation.OperationId.StartsWith(state.IntentId + ":entry:", StringComparison.Ordinal)
+            && operation.Stage is not (RecoveryOperationStage.Prepared or RecoveryOperationStage.Abandoned));
+
+    private async Task<OrderLifecycleResult> RetireUnsentEntryAsync(
+        ManagedOrderState state,
+        CancellationToken cancellationToken)
+    {
+        var saved = await SaveAsync(state with
+        {
+            Status = ManagedOrderStatus.EntryRejected,
+            EntryTerminalState = ManagedEntryTerminalState.Rejected,
+            RemainingQuantity = 0m,
+            LastFailure = "Запись входа завершена без передачи адаптеру."
+        }, cancellationToken).ConfigureAwait(false);
+        return saved is null
+            ? Blocked("Не удалось завершить запись непереданного входа.", state.IntentId)
+            : new(true, saved.LastFailure!, state.IntentId);
+    }
 
     private Task<ManagedOrderState?> SaveAsync(ManagedOrderState state, CancellationToken cancellationToken) =>
         _recovery.SaveManagedOrderAsync(state, cancellationToken);

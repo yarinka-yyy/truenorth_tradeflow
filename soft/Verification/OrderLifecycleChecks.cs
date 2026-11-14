@@ -485,6 +485,15 @@ internal static class OrderLifecycleChecks
     private static void CheckStaleAndRejectedEntry(Action<bool, string> check, string root)
     {
         var fixture = CreateIntent("Market", InitialTime);
+        using (var moving = new Harness(Path.Combine(root, "moving-clock"), InitialTime))
+        {
+            moving.Clock.AdvancePerRead = TimeSpan.FromMilliseconds(1);
+            var result = moving.Orders.OpenAsync(fixture.Intent, fixture.Input, savedOperatingIntent: true)
+                .GetAwaiter().GetResult();
+            check(result.Succeeded && moving.Orders.Orders.Single().Status == ManagedOrderStatus.Protected
+                  && moving.Adapter.ActionCalls.SequenceEqual(["entry", "protect"]),
+                "a fresh snapshot made after the entry begins allows exactly one protected Market entry");
+        }
         using (var stale = new Harness(Path.Combine(root, "stale"), InitialTime))
         {
             stale.Adapter.StaleSnapshot = true;
@@ -494,6 +503,13 @@ internal static class OrderLifecycleChecks
                   && stale.Orders.Orders.Single().Status == ManagedOrderStatus.IntentSaved
                   && !stale.Recovery.IsEntryAllowed(Venue, savedOperatingIntent: true),
                 "a stale exact-account snapshot blocks entry and preserves a venue read-recovery pause");
+            var intentId = stale.Orders.Orders.Single().IntentId;
+            stale.Restart();
+            stale.Adapter.StaleSnapshot = false;
+            stale.Orders.RunDueChecksAsync(intentId).GetAwaiter().GetResult();
+            check(!ManagedOrderState.BlocksNewEntry(stale.Orders.Orders.Single())
+                  && stale.Recovery.State.Operations.Count == 0 && stale.Adapter.ActionCalls.Count == 0,
+                "restart retires a preflight-only intent without sending a financial action");
         }
 
         using var rejected = new Harness(Path.Combine(root, "rejected"), InitialTime);
@@ -876,6 +892,22 @@ internal static class OrderLifecycleChecks
                   && rejected.Orders.Orders.Single().EntryTerminalState == ManagedEntryTerminalState.Open
                   && rejected.Adapter.ActionCalls.Count(action => action == "cancel") == 1,
                 "a confirmed cancel rejection is recorded and the due scheduler does not send the same cancel again");
+            foreach (var restart in new[] { false, true })
+            {
+                var beforeFill = rejected.Orders.Orders.Single();
+                rejected.Adapter.AddPartialFill(beforeFill, fixture.Intent.Quantity / 8m);
+                if (restart)
+                    rejected.Restart();
+                rejected.Clock.UtcNow = beforeFill.NextManagementCheckAt!.Value;
+                rejected.Orders.RunDueChecksAsync(state.IntentId).GetAwaiter().GetResult();
+                var position = rejected.Adapter.Positions.Single(p => p.PositionId == state.PositionId);
+                var protection = rejected.Adapter.Protections.Single(p => p.PositionId == state.PositionId);
+                check(position.Quantity == beforeFill.PositionQuantity + fixture.Intent.Quantity / 8m
+                      && protection.TakeProfitCoveredQuantity == position.Quantity
+                      && protection.StopLossCoveredQuantity == position.Quantity
+                      && rejected.Adapter.ActionCalls.Count(action => action == "cancel") == 1,
+                    $"further Limit fill after refused cancellation receives full protection (restart={restart})");
+            }
         }
 
         foreach (var closeByTakeProfit in new[] { true, false })
@@ -1774,7 +1806,19 @@ internal static class OrderLifecycleChecks
 
     private sealed class FakeClock(DateTimeOffset now) : IRecoveryClock
     {
-        public DateTimeOffset UtcNow { get; set; } = now;
+        private DateTimeOffset _now = now;
+        internal TimeSpan AdvancePerRead { get; set; }
+
+        public DateTimeOffset UtcNow
+        {
+            get
+            {
+                var current = _now;
+                _now += AdvancePerRead;
+                return current;
+            }
+            set => _now = value;
+        }
     }
 
     private sealed class ControlledAdapter(FakeClock clock) : IManagedOrderTestAdapter
